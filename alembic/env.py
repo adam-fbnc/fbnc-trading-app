@@ -9,7 +9,7 @@ from alembic import context
 
 from app.core.config import settings
 from app.core.database import Base
-import app.account.models  # noqa: F401 — ensure models are registered
+import app.account.models  # noqa: F401 — ensure all models are registered with Base.metadata
 
 config = context.config
 config.set_main_option("sqlalchemy.url", settings.database_url)
