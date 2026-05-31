@@ -1,11 +1,11 @@
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from decimal import Decimal
 from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.account.models import Account, AccountSnapshot, Position, Order
+from app.account.models import Account, AccountSnapshot, Position
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
@@ -142,95 +142,6 @@ async def list_positions(account_hash: str, db: AsyncSession) -> list[Position]:
         select(Position).where(Position.account_hash == account_hash)
     )
     return list(result.scalars().all())
-
-
-async def sync_orders(
-    account_hash: str,
-    db: AsyncSession,
-    from_date: datetime | None = None,
-    to_date: datetime | None = None,
-    status: str | None = None,
-) -> list[Order]:
-    client = get_schwab_client()
-
-    now = datetime.now(timezone.utc)
-    from_dt = from_date or (now - timedelta(days=30))
-    to_dt = to_date or now
-
-    response = client.account_orders(
-        account_hash,
-        fromEnteredTime=from_dt,
-        toEnteredTime=to_dt,
-        status=status,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    upserted = []
-    for order_data in data:
-        order_id = str(order_data.get("orderId", ""))
-        legs = order_data.get("orderLegCollection", [{}])
-        first_leg = legs[0] if legs else {}
-        instrument = first_leg.get("instrument", {})
-
-        stmt = insert(Order).values(
-            order_id=order_id,
-            account_hash=account_hash,
-            symbol=instrument.get("symbol"),
-            asset_type=instrument.get("assetType"),
-            order_type=order_data.get("orderType"),
-            status=order_data.get("status"),
-            quantity=_safe_decimal(order_data.get("quantity")),
-            price=_safe_decimal(order_data.get("price")),
-            entered_time=_parse_dt(order_data.get("enteredTime")),
-            close_time=_parse_dt(order_data.get("closeTime")),
-            raw=order_data,
-        ).on_conflict_do_update(
-            index_elements=["order_id"],
-            set_={
-                "status": order_data.get("status"),
-                "close_time": _parse_dt(order_data.get("closeTime")),
-                "raw": order_data,
-            },
-        )
-        await db.execute(stmt)
-        upserted.append(order_id)
-
-    await db.commit()
-    logger.info("Upserted %d order(s) for account %s", len(upserted), account_hash)
-
-    result = await db.execute(
-        select(Order).where(Order.account_hash == account_hash).order_by(Order.entered_time.desc())
-    )
-    return list(result.scalars().all())
-
-
-async def list_orders(
-    account_hash: str,
-    db: AsyncSession,
-    from_date: datetime | None = None,
-    to_date: datetime | None = None,
-    status: str | None = None,
-) -> list[Order]:
-    q = select(Order).where(Order.account_hash == account_hash)
-    if from_date:
-        q = q.where(Order.entered_time >= from_date)
-    if to_date:
-        q = q.where(Order.entered_time <= to_date)
-    if status:
-        q = q.where(Order.status == status)
-    q = q.order_by(Order.entered_time.desc())
-    result = await db.execute(q)
-    return list(result.scalars().all())
-
-
-def _parse_dt(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except Exception:
-        return None
 
 
 def _safe_decimal(value) -> Decimal | None:

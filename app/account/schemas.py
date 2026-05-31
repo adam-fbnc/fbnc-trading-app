@@ -40,19 +40,3 @@ class PositionResponse(BaseModel):
     refreshed_at: datetime
 
     model_config = {"from_attributes": True}
-
-
-class OrderResponse(BaseModel):
-    id: int
-    order_id: str
-    account_hash: str
-    symbol: str | None
-    asset_type: str | None
-    order_type: str | None
-    status: str | None
-    quantity: Decimal | None
-    price: Decimal | None
-    entered_time: datetime | None
-    close_time: datetime | None
-
-    model_config = {"from_attributes": True}

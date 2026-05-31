@@ -62,22 +62,3 @@ class Position(Base):
     refreshed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
-
-
-class Order(Base):
-    __tablename__ = "orders"
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    order_id: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
-    account_hash: Mapped[str] = mapped_column(
-        String, ForeignKey("accounts.account_hash", ondelete="CASCADE"), nullable=False, index=True
-    )
-    symbol: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-    asset_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    order_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    status: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
-    quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
-    price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
-    entered_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
-    close_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
