@@ -23,18 +23,23 @@ async def sync_linked_accounts(db: AsyncSession) -> list[Account]:
 
     for entry in data:
         account_hash = entry.get("hashValue")
-        account_info = entry.get("securitiesAccount", {})
+
+        # account_number is at the top level of the linked_accounts() response
+        account_number = _mask(entry.get("accountNumber"))
+
+        # account_type is not in linked_accounts() — enrich with a details call
+        account_type = _fetch_account_type(client, account_hash)
 
         stmt = insert(Account).values(
             account_hash=account_hash,
-            account_number=_mask(account_info.get("accountNumber")),
-            account_type=account_info.get("type"),
+            account_number=account_number,
+            account_type=account_type,
             raw=entry,
         ).on_conflict_do_update(
             index_elements=["account_hash"],
             set_={
-                "account_number": _mask(account_info.get("accountNumber")),
-                "account_type": account_info.get("type"),
+                "account_number": account_number,
+                "account_type": account_type,
                 "raw": entry,
             },
         )
@@ -299,6 +304,17 @@ async def list_transactions(
         q = q.where(Transaction.transaction_type == transaction_type)
     result = await db.execute(q.order_by(Transaction.trade_date.desc()))
     return list(result.scalars().all())
+
+
+def _fetch_account_type(client, account_hash: str) -> str | None:
+    """Fetch account type from account_details (not available in linked_accounts)."""
+    try:
+        resp = client.account_details(account_hash)
+        resp.raise_for_status()
+        return resp.json().get("securitiesAccount", {}).get("type")
+    except Exception as e:
+        logger.warning("Could not fetch account type for %s: %s", account_hash, e)
+        return None
 
 
 def _parse_dt(value: str | None) -> datetime | None:
