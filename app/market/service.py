@@ -1,16 +1,21 @@
 import logging
 from datetime import datetime, timezone, date as date_type
+from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.market.models import MarketHours
+from app.market.models import MarketHours, QuoteSnapshot
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
 
 VALID_MARKETS = {"equity", "option", "bond", "future", "forex"}
 
+
+# ---------------------------------------------------------------------------
+# Market Hours
+# ---------------------------------------------------------------------------
 
 async def get_market_hours(
     market: str,
@@ -19,7 +24,6 @@ async def get_market_hours(
 ) -> MarketHours:
     target_date = date or datetime.now(timezone.utc).date()
 
-    # Return cached result if already fetched today
     existing = await db.execute(
         select(MarketHours).where(
             MarketHours.market == market,
@@ -73,19 +77,68 @@ async def is_market_open(market: str, db: AsyncSession) -> bool:
     return record.is_open
 
 
+# ---------------------------------------------------------------------------
+# Quotes
+# ---------------------------------------------------------------------------
+
+async def get_quotes(symbols: list[str], db: AsyncSession) -> list[QuoteSnapshot]:
+    client = get_schwab_client()
+    response = client.quotes(symbols, fields="all")
+    response.raise_for_status()
+    raw_data = response.json()
+
+    snapshots = []
+    now = datetime.now(timezone.utc)
+
+    for symbol, quote_data in raw_data.items():
+        quote = quote_data.get("quote", {})
+        reference = quote_data.get("reference", {})
+
+        snapshot = QuoteSnapshot(
+            symbol=symbol,
+            asset_type=quote_data.get("assetMainType") or reference.get("assetType"),
+            last_price=_d(quote.get("lastPrice") or quote.get("mark")),
+            bid_price=_d(quote.get("bidPrice")),
+            ask_price=_d(quote.get("askPrice")),
+            open_price=_d(quote.get("openPrice")),
+            high_price=_d(quote.get("highPrice")),
+            low_price=_d(quote.get("lowPrice")),
+            close_price=_d(quote.get("closePrice")),
+            volume=quote.get("totalVolume") or quote.get("volume"),
+            raw=quote_data,
+            quoted_at=now,
+        )
+        db.add(snapshot)
+        snapshots.append(snapshot)
+
+    await db.commit()
+    logger.info("Fetched and persisted quotes for %d symbol(s)", len(snapshots))
+    return snapshots
+
+
+async def get_quote(symbol: str, db: AsyncSession) -> QuoteSnapshot:
+    results = await get_quotes([symbol], db)
+    return results[0]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _parse_hours(raw: dict, market: str) -> tuple[bool, dict | None]:
-    """
-    Schwab returns nested: { "equity": { "EQ": { "isOpen": bool, "sessionHours": {...} } } }
-    Walk the response to find the first market entry regardless of the inner key.
-    """
     try:
         market_data = raw.get(market, {})
         if not market_data:
             return False, None
         inner = next(iter(market_data.values()), {})
-        is_open = inner.get("isOpen", False)
-        session_hours = inner.get("sessionHours")
-        return is_open, session_hours
+        return inner.get("isOpen", False), inner.get("sessionHours")
     except Exception as e:
         logger.warning("Could not parse market hours response: %s", e)
         return False, None
+
+
+def _d(value) -> Decimal | None:
+    try:
+        return Decimal(str(value)) if value is not None else None
+    except Exception:
+        return None
