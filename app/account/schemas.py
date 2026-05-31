@@ -40,3 +40,34 @@ class PositionResponse(BaseModel):
     refreshed_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class OrderResponse(BaseModel):
+    id: int
+    order_id: str
+    account_hash: str
+    symbol: str | None
+    asset_type: str | None
+    order_type: str | None
+    status: str | None
+    quantity: Decimal | None
+    price: Decimal | None
+    entered_time: datetime | None
+    close_time: datetime | None
+
+    model_config = {"from_attributes": True}
+
+
+class TransactionResponse(BaseModel):
+    id: int
+    transaction_id: str
+    account_hash: str
+    transaction_type: str | None
+    symbol: str | None
+    cusip: str | None
+    amount: Decimal | None
+    fees: Decimal | None
+    trade_date: datetime | None
+    settlement_date: datetime | None
+
+    model_config = {"from_attributes": True}

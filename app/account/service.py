@@ -1,11 +1,11 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 from sqlalchemy import select, delete
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.account.models import Account, AccountSnapshot, Position
+from app.account.models import Account, AccountSnapshot, Position, Order, Transaction
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,172 @@ async def list_positions(account_hash: str, db: AsyncSession) -> list[Position]:
         select(Position).where(Position.account_hash == account_hash)
     )
     return list(result.scalars().all())
+
+
+async def sync_orders(
+    account_hash: str,
+    db: AsyncSession,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    status: str | None = None,
+) -> list[Order]:
+    client = get_schwab_client()
+
+    now = datetime.now(timezone.utc)
+    from_dt = from_date or (now - timedelta(days=30))
+    to_dt = to_date or now
+
+    response = client.account_orders(
+        account_hash,
+        fromEnteredTime=from_dt,
+        toEnteredTime=to_dt,
+        status=status,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    for order_data in data:
+        order_id = str(order_data.get("orderId", ""))
+        legs = order_data.get("orderLegCollection", [{}])
+        first_leg = legs[0] if legs else {}
+        instrument = first_leg.get("instrument", {})
+
+        stmt = insert(Order).values(
+            order_id=order_id,
+            account_hash=account_hash,
+            symbol=instrument.get("symbol"),
+            asset_type=instrument.get("assetType"),
+            order_type=order_data.get("orderType"),
+            status=order_data.get("status"),
+            quantity=_safe_decimal(order_data.get("quantity")),
+            price=_safe_decimal(order_data.get("price")),
+            entered_time=_parse_dt(order_data.get("enteredTime")),
+            close_time=_parse_dt(order_data.get("closeTime")),
+            raw=order_data,
+        ).on_conflict_do_update(
+            index_elements=["order_id"],
+            set_={
+                "status": order_data.get("status"),
+                "close_time": _parse_dt(order_data.get("closeTime")),
+                "raw": order_data,
+            },
+        )
+        await db.execute(stmt)
+
+    await db.commit()
+    logger.info("Upserted %d order(s) for account %s", len(data), account_hash)
+
+    result = await db.execute(
+        select(Order).where(Order.account_hash == account_hash).order_by(Order.entered_time.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def list_orders(
+    account_hash: str,
+    db: AsyncSession,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    status: str | None = None,
+) -> list[Order]:
+    q = select(Order).where(Order.account_hash == account_hash)
+    if from_date:
+        q = q.where(Order.entered_time >= from_date)
+    if to_date:
+        q = q.where(Order.entered_time <= to_date)
+    if status:
+        q = q.where(Order.status == status)
+    result = await db.execute(q.order_by(Order.entered_time.desc()))
+    return list(result.scalars().all())
+
+
+async def sync_transactions(
+    account_hash: str,
+    db: AsyncSession,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    types: str = "TRADE",
+) -> list[Transaction]:
+    client = get_schwab_client()
+
+    now = datetime.now(timezone.utc)
+    from_dt = from_date or (now - timedelta(days=90))
+    to_dt = to_date or now
+
+    response = client.transactions(
+        account_hash,
+        startDate=from_dt,
+        endDate=to_dt,
+        types=types,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    for txn in data:
+        transaction_id = str(txn.get("activityId") or txn.get("transactionId", ""))
+        transfer_items = txn.get("transferItems", [{}])
+        first_item = transfer_items[0] if transfer_items else {}
+        instrument = first_item.get("instrument", {})
+        fees_detail = txn.get("fees", {})
+        total_fees = sum(
+            _safe_decimal(v) or Decimal("0")
+            for v in fees_detail.values()
+            if isinstance(v, (int, float, str))
+        )
+
+        stmt = insert(Transaction).values(
+            transaction_id=transaction_id,
+            account_hash=account_hash,
+            transaction_type=txn.get("type"),
+            symbol=instrument.get("symbol"),
+            cusip=instrument.get("cusip"),
+            amount=_safe_decimal(txn.get("netAmount")),
+            fees=total_fees if total_fees else None,
+            trade_date=_parse_dt(txn.get("tradeDate")),
+            settlement_date=_parse_dt(txn.get("settlementDate")),
+            raw=txn,
+        ).on_conflict_do_update(
+            index_elements=["transaction_id"],
+            set_={"raw": txn},
+        )
+        await db.execute(stmt)
+
+    await db.commit()
+    logger.info("Upserted %d transaction(s) for account %s", len(data), account_hash)
+
+    result = await db.execute(
+        select(Transaction)
+        .where(Transaction.account_hash == account_hash)
+        .order_by(Transaction.trade_date.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def list_transactions(
+    account_hash: str,
+    db: AsyncSession,
+    from_date: datetime | None = None,
+    to_date: datetime | None = None,
+    transaction_type: str | None = None,
+) -> list[Transaction]:
+    q = select(Transaction).where(Transaction.account_hash == account_hash)
+    if from_date:
+        q = q.where(Transaction.trade_date >= from_date)
+    if to_date:
+        q = q.where(Transaction.trade_date <= to_date)
+    if transaction_type:
+        q = q.where(Transaction.transaction_type == transaction_type)
+    result = await db.execute(q.order_by(Transaction.trade_date.desc()))
+    return list(result.scalars().all())
+
+
+def _parse_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
 
 
 def _safe_decimal(value) -> Decimal | None:
