@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, date
 from decimal import Decimal
-from sqlalchemy import String, DateTime, Date, Boolean, UniqueConstraint, Numeric
+from sqlalchemy import String, DateTime, Date, Boolean, UniqueConstraint, Numeric, BigInteger
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -42,4 +42,26 @@ class QuoteSnapshot(Base):
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
     quoted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
+    )
+
+
+class PriceBar(Base):
+    __tablename__ = "price_bars"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # frequency_type: minute, daily, weekly, monthly
+    frequency_type: Mapped[str] = mapped_column(String, nullable=False)
+    # frequency: 1, 5, 10, 15, 30 (for minute); 1 (for daily/weekly/monthly)
+    frequency: Mapped[int] = mapped_column(nullable=False)
+    bar_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    open: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    high: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    low: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    close: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    volume: Mapped[int] = mapped_column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "frequency_type", "frequency", "bar_timestamp",
+                         name="uq_price_bars_symbol_freq_ts"),
     )

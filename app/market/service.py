@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.market.models import MarketHours, QuoteSnapshot
+from app.market.models import MarketHours, QuoteSnapshot, PriceBar
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,78 @@ async def get_quotes(symbols: list[str], db: AsyncSession) -> list[QuoteSnapshot
 async def get_quote(symbol: str, db: AsyncSession) -> QuoteSnapshot:
     results = await get_quotes([symbol], db)
     return results[0]
+
+
+# ---------------------------------------------------------------------------
+# Price History
+# ---------------------------------------------------------------------------
+
+async def get_price_history(
+    symbol: str,
+    db: AsyncSession,
+    period_type: str = "day",
+    period: int | None = None,
+    frequency_type: str = "minute",
+    frequency: int = 1,
+    start_date: datetime | None = None,
+    end_date: datetime | None = None,
+    need_extended_hours: bool = False,
+) -> list[PriceBar]:
+    client = get_schwab_client()
+    response = client.price_history(
+        symbol,
+        periodType=period_type,
+        period=period,
+        frequencyType=frequency_type,
+        frequency=frequency,
+        startDate=start_date,
+        endDate=end_date,
+        needExtendedHoursData=need_extended_hours,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    candles = data.get("candles", [])
+    if not candles:
+        logger.info("No price bars returned for %s", symbol)
+        return []
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    import datetime as dt_module
+
+    rows = []
+    for candle in candles:
+        # Schwab returns epoch milliseconds
+        ts = datetime.fromtimestamp(candle["datetime"] / 1000, tz=timezone.utc)
+        rows.append({
+            "symbol": symbol.upper(),
+            "frequency_type": frequency_type,
+            "frequency": frequency,
+            "bar_timestamp": ts,
+            "open": _d(candle["open"]),
+            "high": _d(candle["high"]),
+            "low": _d(candle["low"]),
+            "close": _d(candle["close"]),
+            "volume": int(candle.get("volume", 0)),
+        })
+
+    stmt = pg_insert(PriceBar).values(rows).on_conflict_do_nothing(
+        constraint="uq_price_bars_symbol_freq_ts"
+    )
+    await db.execute(stmt)
+    await db.commit()
+    logger.info("Upserted %d price bar(s) for %s (%s/%s)", len(rows), symbol, frequency_type, frequency)
+
+    result = await db.execute(
+        select(PriceBar)
+        .where(
+            PriceBar.symbol == symbol.upper(),
+            PriceBar.frequency_type == frequency_type,
+            PriceBar.frequency == frequency,
+        )
+        .order_by(PriceBar.bar_timestamp)
+    )
+    return list(result.scalars().all())
 
 
 # ---------------------------------------------------------------------------
