@@ -277,7 +277,13 @@ async def get_instrument_by_cusip(cusip: str) -> dict:
 def _parse_option_chain(
     underlying: str, data: dict, snapped_at: datetime
 ) -> list[dict]:
-    rows = []
+    # Keyed by the DB unique constraint (expiration, strike, contract_type) so we
+    # never emit two rows that collide on ON CONFLICT in a single INSERT. Some
+    # underlyings (e.g. post-split NVDA) return both standard and adjusted/
+    # non-standard contracts at the same strike+expiration; we keep the one with
+    # the highest open interest (the standard, liquid contract).
+    by_key: dict[tuple, dict] = {}
+
     for contract_type_key in ("callExpDateMap", "putExpDateMap"):
         contract_type = "CALL" if contract_type_key == "callExpDateMap" else "PUT"
         for exp_key, strikes in data.get(contract_type_key, {}).items():
@@ -290,14 +296,16 @@ def _parse_option_chain(
                 continue
 
             for strike_str, contracts in strikes.items():
+                strike = _d(strike_str)
                 for contract in contracts:
-                    rows.append({
+                    key = (exp_date, strike, contract_type)
+                    row = {
                         "underlying_symbol": underlying,
                         "symbol": contract.get("symbol", ""),
                         "cusip": contract.get("cusip"),
                         "contract_type": contract_type,
                         "expiration_date": exp_date,
-                        "strike": _d(strike_str),
+                        "strike": strike,
                         "open_interest": contract.get("openInterest"),
                         "volume": contract.get("totalVolume"),
                         "implied_volatility": _d(contract.get("volatility")),
@@ -310,8 +318,16 @@ def _parse_option_chain(
                         "ask": _d(contract.get("ask")),
                         "raw": contract,
                         "snapped_at": snapped_at,
-                    })
-    return rows
+                    }
+                    existing = by_key.get(key)
+                    if existing is None or _oi(row) > _oi(existing):
+                        by_key[key] = row
+
+    return list(by_key.values())
+
+
+def _oi(row: dict) -> int:
+    return row.get("open_interest") or 0
 
 
 # ---------------------------------------------------------------------------
