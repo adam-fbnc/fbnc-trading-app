@@ -8,6 +8,34 @@ from app.core.database import get_db
 router = APIRouter(prefix="/market", tags=["market"])
 
 
+@router.get("/instruments", response_model=list[schemas.InstrumentResponse])
+async def search_instruments(
+    symbol: str = Query(description="Symbol or search term"),
+    projection: str = Query(
+        default="symbol-search",
+        description="symbol-search, symbol-regex, desc-search, desc-regex, fundamental"
+    ),
+):
+    raw = await service.search_instruments(symbol, projection)
+    return [_map_instrument(i) for i in raw]
+
+
+@router.get("/instruments/{cusip}", response_model=schemas.InstrumentResponse)
+async def get_instrument_by_cusip(cusip: str):
+    raw = await service.get_instrument_by_cusip(cusip)
+    return _map_instrument(raw)
+
+
+def _map_instrument(data: dict) -> dict:
+    return {
+        "symbol": data.get("symbol", ""),
+        "cusip": data.get("cusip"),
+        "description": data.get("description"),
+        "exchange": data.get("exchange"),
+        "asset_type": data.get("assetType") or data.get("instrumentType"),
+    }
+
+
 @router.get("/hours", response_model=schemas.MarketHoursResponse)
 async def get_market_hours(
     market: str = Query(description="Market type: equity, option, bond, future, forex"),
