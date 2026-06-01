@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,3 +39,27 @@ async def get_quote(
     db: AsyncSession = Depends(get_db),
 ):
     return await service.get_quote(symbol.upper(), db)
+
+
+@router.get("/{symbol}/history", response_model=list[schemas.PriceBarResponse])
+async def get_price_history(
+    symbol: str,
+    period_type: str = Query(default="day", description="day, month, year, ytd"),
+    period: int | None = Query(default=None, description="Number of periods"),
+    frequency_type: str = Query(default="minute", description="minute, daily, weekly, monthly"),
+    frequency: int = Query(default=1, description="Frequency within frequency_type"),
+    start_date: datetime | None = Query(default=None),
+    end_date: datetime | None = Query(default=None),
+    need_extended_hours: bool = Query(default=False),
+    db: AsyncSession = Depends(get_db),
+):
+    valid_period_types = {"day", "month", "year", "ytd"}
+    valid_frequency_types = {"minute", "daily", "weekly", "monthly"}
+    if period_type not in valid_period_types:
+        raise HTTPException(status_code=400, detail=f"period_type must be one of {valid_period_types}")
+    if frequency_type not in valid_frequency_types:
+        raise HTTPException(status_code=400, detail=f"frequency_type must be one of {valid_frequency_types}")
+    return await service.get_price_history(
+        symbol.upper(), db, period_type, period, frequency_type, frequency,
+        start_date, end_date, need_extended_hours,
+    )

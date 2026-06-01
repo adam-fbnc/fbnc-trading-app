@@ -27,3 +27,17 @@ class QuoteResponse(BaseModel):
     quoted_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class PriceBarResponse(BaseModel):
+    symbol: str
+    frequency_type: str
+    frequency: int
+    bar_timestamp: datetime
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: int
+
+    model_config = {"from_attributes": True}
