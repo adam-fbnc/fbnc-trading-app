@@ -5,8 +5,8 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.gex.calculator import calculate_gex, ContractInput, GEXResult
-from app.market.models import OptionContract
-from app.market.service import get_quote
+from app.market.models import OptionContract, QuoteSnapshot
+from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
 
@@ -56,14 +56,14 @@ async def build_gex(
     if not contracts:
         return None
 
-    # Get spot price from latest quote if not provided
+    # Get spot price — DB cache first, live API only as fallback
     if spot_price is None:
-        try:
-            quote = await get_quote(symbol, db)
-            spot_price = quote.last_price
-        except Exception as e:
-            logger.warning("Could not fetch spot price for %s: %s", symbol, e)
-            return None
+        spot_price = await _get_spot_price(symbol, db)
+    if spot_price is None:
+        raise ValueError(
+            f"Cannot compute GEX for {symbol}: no spot price available. "
+            f"Run GET /market/quotes/{symbol} to fetch a current quote first."
+        )
 
     inputs = [
         ContractInput(
@@ -76,6 +76,36 @@ async def build_gex(
     ]
 
     return calculate_gex(symbol, inputs, spot_price)
+
+
+async def _get_spot_price(symbol: str, db: AsyncSession) -> Decimal | None:
+    """
+    Read latest cached quote from DB. Falls back to a live Schwab API call
+    only if no cached quote exists. Never raises — returns None on failure.
+    """
+    # Try DB cache first (no side effects, no API call)
+    result = await db.execute(
+        select(QuoteSnapshot.last_price)
+        .where(QuoteSnapshot.symbol == symbol, QuoteSnapshot.last_price.is_not(None))
+        .order_by(QuoteSnapshot.quoted_at.desc())
+        .limit(1)
+    )
+    cached = result.scalar_one_or_none()
+    if cached is not None:
+        return cached
+
+    # Fall back to live API
+    try:
+        client = get_schwab_client()
+        response = client.quotes([symbol], fields="quote")
+        response.raise_for_status()
+        data = response.json()
+        quote = data.get(symbol, {}).get("quote", {})
+        price = quote.get("lastPrice") or quote.get("mark")
+        return Decimal(str(price)) if price is not None else None
+    except Exception as e:
+        logger.warning("Could not fetch live spot price for %s: %s", symbol, e)
+        return None
 
 
 async def get_oi_changes(
