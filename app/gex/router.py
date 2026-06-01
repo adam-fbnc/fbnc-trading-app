@@ -16,11 +16,14 @@ router = APIRouter(prefix="/gex", tags=["gex"])
 
 @router.get("/{symbol}", response_model=GEXResponse)
 async def get_gex(symbol: str, db: AsyncSession = Depends(get_db)):
-    result = await service.build_gex(symbol, db)
+    try:
+        result = await service.build_gex(symbol, db)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     if result is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No option chain data for {symbol.upper()}. Run POST /gex/symbols to track it first.",
+            detail=f"No option chain data for {symbol.upper()}. Fetch a chain first via GET /market/{symbol.upper()}/option-chain.",
         )
     return GEXResponse(
         symbol=result.symbol,
@@ -53,7 +56,10 @@ async def get_oi_changes(symbol: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{symbol}/chart", response_class=HTMLResponse)
 async def get_gex_chart(symbol: str, db: AsyncSession = Depends(get_db)):
-    result = await service.build_gex(symbol, db)
+    try:
+        result = await service.build_gex(symbol, db)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     if result is None:
         raise HTTPException(
             status_code=404,
