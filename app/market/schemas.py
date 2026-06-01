@@ -43,6 +43,16 @@ class PriceBarResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class InstrumentResponse(BaseModel):
+    symbol: str
+    cusip: str | None = None
+    description: str | None = None
+    exchange: str | None = None
+    asset_type: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class OptionContractResponse(BaseModel):
     underlying_symbol: str
     symbol: str

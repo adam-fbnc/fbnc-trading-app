@@ -254,6 +254,26 @@ async def get_option_chain(
     return list(result.scalars().all())
 
 
+# ---------------------------------------------------------------------------
+# Instrument Search
+# ---------------------------------------------------------------------------
+
+async def search_instruments(symbol: str, projection: str = "symbol-search") -> list[dict]:
+    client = get_schwab_client()
+    response = client.instruments(symbol, projection=projection)
+    response.raise_for_status()
+    data = response.json()
+    instruments = data.get("instruments", data) if isinstance(data, dict) else data
+    return instruments if isinstance(instruments, list) else list(instruments.values())
+
+
+async def get_instrument_by_cusip(cusip: str) -> dict:
+    client = get_schwab_client()
+    response = client.instrument_cusip(cusip)
+    response.raise_for_status()
+    return response.json()
+
+
 def _parse_option_chain(
     underlying: str, data: dict, snapped_at: datetime
 ) -> list[dict]:
