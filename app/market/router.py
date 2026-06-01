@@ -41,6 +41,23 @@ async def get_quote(
     return await service.get_quote(symbol.upper(), db)
 
 
+@router.get("/{symbol}/option-chain", response_model=list[schemas.OptionContractResponse])
+async def get_option_chain(
+    symbol: str,
+    contract_type: str = Query(default="ALL", description="CALL, PUT, or ALL"),
+    strike_count: int | None = Query(default=None, description="Number of strikes above and below ATM"),
+    from_date: date | None = Query(default=None, description="Earliest expiration date"),
+    to_date: date | None = Query(default=None, description="Latest expiration date"),
+    include_underlying_quote: bool = Query(default=True),
+    db: AsyncSession = Depends(get_db),
+):
+    if contract_type not in {"CALL", "PUT", "ALL"}:
+        raise HTTPException(status_code=400, detail="contract_type must be CALL, PUT, or ALL")
+    return await service.get_option_chain(
+        symbol.upper(), db, contract_type, strike_count, from_date, to_date, include_underlying_quote
+    )
+
+
 @router.get("/{symbol}/history", response_model=list[schemas.PriceBarResponse])
 async def get_price_history(
     symbol: str,
