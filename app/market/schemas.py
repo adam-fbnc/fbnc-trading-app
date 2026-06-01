@@ -41,3 +41,25 @@ class PriceBarResponse(BaseModel):
     volume: int
 
     model_config = {"from_attributes": True}
+
+
+class OptionContractResponse(BaseModel):
+    underlying_symbol: str
+    symbol: str
+    cusip: str | None
+    contract_type: str
+    expiration_date: date
+    strike: Decimal
+    open_interest: int | None
+    volume: int | None
+    implied_volatility: Decimal | None
+    delta: Decimal | None
+    gamma: Decimal | None
+    theta: Decimal | None
+    vega: Decimal | None
+    last_price: Decimal | None
+    bid: Decimal | None
+    ask: Decimal | None
+    snapped_at: datetime
+
+    model_config = {"from_attributes": True}

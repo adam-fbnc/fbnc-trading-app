@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.market.models import MarketHours, QuoteSnapshot, PriceBar
+from app.market.models import MarketHours, QuoteSnapshot, PriceBar, OptionContract
 from app.core.schwab_client import get_schwab_client
 
 logger = logging.getLogger(__name__)
@@ -191,6 +191,107 @@ async def get_price_history(
         .order_by(PriceBar.bar_timestamp)
     )
     return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# Option Chains
+# ---------------------------------------------------------------------------
+
+async def get_option_chain(
+    symbol: str,
+    db: AsyncSession,
+    contract_type: str = "ALL",
+    strike_count: int | None = None,
+    from_date: date_type | None = None,
+    to_date: date_type | None = None,
+    include_underlying_quote: bool = True,
+) -> list[OptionContract]:
+    client = get_schwab_client()
+    response = client.option_chains(
+        symbol,
+        contractType=contract_type,
+        strikeCount=strike_count,
+        fromDate=from_date,
+        toDate=to_date,
+        includeUnderlyingQuote=include_underlying_quote,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    snapped_at = datetime.now(timezone.utc)
+    contracts = _parse_option_chain(symbol.upper(), data, snapped_at)
+
+    if not contracts:
+        logger.info("No option contracts returned for %s", symbol)
+        return []
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    stmt = pg_insert(OptionContract).values(contracts).on_conflict_do_update(
+        constraint="uq_option_contracts_key",
+        set_={
+            "open_interest": pg_insert(OptionContract).excluded.open_interest,
+            "volume": pg_insert(OptionContract).excluded.volume,
+            "implied_volatility": pg_insert(OptionContract).excluded.implied_volatility,
+            "delta": pg_insert(OptionContract).excluded.delta,
+            "gamma": pg_insert(OptionContract).excluded.gamma,
+            "theta": pg_insert(OptionContract).excluded.theta,
+            "vega": pg_insert(OptionContract).excluded.vega,
+            "last_price": pg_insert(OptionContract).excluded.last_price,
+            "bid": pg_insert(OptionContract).excluded.bid,
+            "ask": pg_insert(OptionContract).excluded.ask,
+            "raw": pg_insert(OptionContract).excluded.raw,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+    logger.info("Upserted %d option contract(s) for %s", len(contracts), symbol)
+
+    result = await db.execute(
+        select(OptionContract)
+        .where(OptionContract.underlying_symbol == symbol.upper())
+        .order_by(OptionContract.expiration_date, OptionContract.strike, OptionContract.contract_type)
+    )
+    return list(result.scalars().all())
+
+
+def _parse_option_chain(
+    underlying: str, data: dict, snapped_at: datetime
+) -> list[dict]:
+    rows = []
+    for contract_type_key in ("callExpDateMap", "putExpDateMap"):
+        contract_type = "CALL" if contract_type_key == "callExpDateMap" else "PUT"
+        for exp_key, strikes in data.get(contract_type_key, {}).items():
+            # exp_key format: "2026-01-17:30" (date:daysToExpiration)
+            exp_date_str = exp_key.split(":")[0]
+            try:
+                from datetime import date as dt_date
+                exp_date = dt_date.fromisoformat(exp_date_str)
+            except ValueError:
+                continue
+
+            for strike_str, contracts in strikes.items():
+                for contract in contracts:
+                    rows.append({
+                        "underlying_symbol": underlying,
+                        "symbol": contract.get("symbol", ""),
+                        "cusip": contract.get("cusip"),
+                        "contract_type": contract_type,
+                        "expiration_date": exp_date,
+                        "strike": _d(strike_str),
+                        "open_interest": contract.get("openInterest"),
+                        "volume": contract.get("totalVolume"),
+                        "implied_volatility": _d(contract.get("volatility")),
+                        "delta": _d(contract.get("delta")),
+                        "gamma": _d(contract.get("gamma")),
+                        "theta": _d(contract.get("theta")),
+                        "vega": _d(contract.get("vega")),
+                        "last_price": _d(contract.get("last")),
+                        "bid": _d(contract.get("bid")),
+                        "ask": _d(contract.get("ask")),
+                        "raw": contract,
+                        "snapped_at": snapped_at,
+                    })
+    return rows
 
 
 # ---------------------------------------------------------------------------

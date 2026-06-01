@@ -65,3 +65,35 @@ class PriceBar(Base):
         UniqueConstraint("symbol", "frequency_type", "frequency", "bar_timestamp",
                          name="uq_price_bars_symbol_freq_ts"),
     )
+
+
+class OptionContract(Base):
+    """One option contract row per (underlying, expiration, strike, type, snap date)."""
+    __tablename__ = "option_contracts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    underlying_symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    cusip: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    contract_type: Mapped[str] = mapped_column(String, nullable=False)          # CALL / PUT
+    expiration_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    strike: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, index=True)
+    open_interest: Mapped[int | None] = mapped_column(nullable=True)
+    volume: Mapped[int | None] = mapped_column(nullable=True)
+    implied_volatility: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    delta: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    gamma: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    theta: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    vega: Mapped[Decimal | None] = mapped_column(Numeric(18, 8), nullable=True)
+    last_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    bid: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    ask: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    snapped_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "underlying_symbol", "expiration_date", "strike", "contract_type", "snapped_at",
+            name="uq_option_contracts_key"
+        ),
+    )
