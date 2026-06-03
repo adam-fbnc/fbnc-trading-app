@@ -13,8 +13,12 @@ logger = logging.getLogger(__name__)
 VALID_MARKETS = {"equity", "option", "bond", "future", "forex"}
 
 # Number of columns inserted per option_contracts row — used to size insert
-# batches under PostgreSQL's 65535 bind-parameter limit.
+# batches under asyncpg's bind-parameter limit.
 OPTION_INSERT_COLS = 18
+
+# asyncpg caps bind parameters per statement at 32767 (Postgres protocol int16).
+# Stay well under it with a safety margin.
+MAX_BIND_PARAMS = 30000
 
 
 # ---------------------------------------------------------------------------
@@ -232,10 +236,10 @@ async def get_option_chain(
 
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    # PostgreSQL's wire protocol caps bind parameters at 65535 per statement.
-    # With OPTION_INSERT_COLS columns per row, we batch to stay safely under it.
+    # asyncpg caps bind parameters at 32767 per statement. With
+    # OPTION_INSERT_COLS columns per row, batch to stay under MAX_BIND_PARAMS.
     # NVDA's full chain alone is ~4,300 rows × 18 cols ≈ 77k params in one shot.
-    batch_size = 60000 // OPTION_INSERT_COLS  # ~3000 rows/batch
+    batch_size = MAX_BIND_PARAMS // OPTION_INSERT_COLS  # ~1666 rows/batch
     total = len(contracts)
     for start in range(0, total, batch_size):
         chunk = contracts[start:start + batch_size]
