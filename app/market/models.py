@@ -38,7 +38,9 @@ class QuoteSnapshot(Base):
     high_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     low_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     close_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
-    volume: Mapped[int | None] = mapped_column(nullable=True)
+    # BigInteger to match migration 0007 and hold high-volume symbols (>2.1B
+    # would overflow a 32-bit Integer and raise an asyncpg int32 error).
+    volume: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
     quoted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), index=True
