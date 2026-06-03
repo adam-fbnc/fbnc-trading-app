@@ -3,6 +3,7 @@ from datetime import datetime, timezone, date as date_type
 from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.market.models import MarketHours, QuoteSnapshot, PriceBar, OptionContract
@@ -259,7 +260,20 @@ async def get_option_chain(
                 "raw": pg_insert(OptionContract).excluded.raw,
             },
         )
-        await db.execute(stmt)
+        try:
+            await db.execute(stmt)
+        except SQLAlchemyError as e:
+            # Surface the concise underlying driver error (asyncpg), not the
+            # 30k-parameter statement dump. e.orig is the real DBAPI exception.
+            orig = getattr(e, "orig", None)
+            logger.error(
+                "DB insert failed for %s batch rows %d-%d: %s: %s",
+                symbol, start, start + len(chunk),
+                type(orig).__name__ if orig else type(e).__name__,
+                orig if orig else e,
+            )
+            await db.rollback()
+            raise
         logger.debug("Inserted batch %d-%d of %d for %s", start, start + len(chunk), total, symbol)
 
     await db.commit()
