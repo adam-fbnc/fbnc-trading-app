@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 
 VALID_MARKETS = {"equity", "option", "bond", "future", "forex"}
 
+# Number of columns inserted per option_contracts row — used to size insert
+# batches under PostgreSQL's 65535 bind-parameter limit.
+OPTION_INSERT_COLS = 18
+
 
 # ---------------------------------------------------------------------------
 # Market Hours
@@ -220,31 +224,43 @@ async def get_option_chain(
 
     snapped_at = datetime.now(timezone.utc)
     contracts = _parse_option_chain(symbol.upper(), data, snapped_at)
+    logger.info("Parsed %d option contract(s) for %s", len(contracts), symbol)
 
     if not contracts:
         logger.info("No option contracts returned for %s", symbol)
         return []
 
     from sqlalchemy.dialects.postgresql import insert as pg_insert
-    stmt = pg_insert(OptionContract).values(contracts).on_conflict_do_update(
-        constraint="uq_option_contracts_key",
-        set_={
-            "open_interest": pg_insert(OptionContract).excluded.open_interest,
-            "volume": pg_insert(OptionContract).excluded.volume,
-            "implied_volatility": pg_insert(OptionContract).excluded.implied_volatility,
-            "delta": pg_insert(OptionContract).excluded.delta,
-            "gamma": pg_insert(OptionContract).excluded.gamma,
-            "theta": pg_insert(OptionContract).excluded.theta,
-            "vega": pg_insert(OptionContract).excluded.vega,
-            "last_price": pg_insert(OptionContract).excluded.last_price,
-            "bid": pg_insert(OptionContract).excluded.bid,
-            "ask": pg_insert(OptionContract).excluded.ask,
-            "raw": pg_insert(OptionContract).excluded.raw,
-        },
-    )
-    await db.execute(stmt)
+
+    # PostgreSQL's wire protocol caps bind parameters at 65535 per statement.
+    # With OPTION_INSERT_COLS columns per row, we batch to stay safely under it.
+    # NVDA's full chain alone is ~4,300 rows × 18 cols ≈ 77k params in one shot.
+    batch_size = 60000 // OPTION_INSERT_COLS  # ~3000 rows/batch
+    total = len(contracts)
+    for start in range(0, total, batch_size):
+        chunk = contracts[start:start + batch_size]
+        stmt = pg_insert(OptionContract).values(chunk).on_conflict_do_update(
+            constraint="uq_option_contracts_key",
+            set_={
+                "open_interest": pg_insert(OptionContract).excluded.open_interest,
+                "volume": pg_insert(OptionContract).excluded.volume,
+                "implied_volatility": pg_insert(OptionContract).excluded.implied_volatility,
+                "delta": pg_insert(OptionContract).excluded.delta,
+                "gamma": pg_insert(OptionContract).excluded.gamma,
+                "theta": pg_insert(OptionContract).excluded.theta,
+                "vega": pg_insert(OptionContract).excluded.vega,
+                "last_price": pg_insert(OptionContract).excluded.last_price,
+                "bid": pg_insert(OptionContract).excluded.bid,
+                "ask": pg_insert(OptionContract).excluded.ask,
+                "raw": pg_insert(OptionContract).excluded.raw,
+            },
+        )
+        await db.execute(stmt)
+        logger.debug("Inserted batch %d-%d of %d for %s", start, start + len(chunk), total, symbol)
+
     await db.commit()
-    logger.info("Upserted %d option contract(s) for %s", len(contracts), symbol)
+    logger.info("Upserted %d option contract(s) for %s in %d batch(es)",
+                total, symbol, (total + batch_size - 1) // batch_size)
 
     result = await db.execute(
         select(OptionContract)

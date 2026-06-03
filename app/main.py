@@ -3,13 +3,15 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.core.logging_config import setup_logging
+from app.core.middleware import register_observability
 from app.account.router import router as account_router
 from app.market.router import router as market_router
 from app.orders.router import router as orders_router
 from app.streaming.router import router as stream_router
 from app.gex.router import router as gex_router
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+setup_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +47,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Schwab Trading API", version="0.1.0", lifespan=lifespan)
+
+register_observability(app)
 
 app.include_router(account_router)
 app.include_router(market_router)
