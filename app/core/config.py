@@ -14,5 +14,10 @@ class Settings(BaseSettings):
     jira_email: str = ""
     jira_api_token: str = ""
 
+    # Observability
+    log_level: str = "INFO"          # DEBUG, INFO, WARNING, ERROR
+    sql_echo: bool = False           # echo all SQL statements when True
+    log_request_body: bool = False   # include request bodies in access logs (verbose)
+
 
 settings = Settings()
