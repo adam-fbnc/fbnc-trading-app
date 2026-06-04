@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pydantic import BaseModel
 
@@ -30,3 +30,29 @@ class AccountDeltaSummaryResponse(BaseModel):
     account_hash: str
     total_net_delta: Decimal | None
     underlyings: list[UnderlyingDeltaResponse]
+
+
+class DeltaEmaResponse(BaseModel):
+    underlying: str
+    short_call_symbol: str | None
+    current_delta: Decimal | None
+    ema_delta: Decimal | None
+    span: int
+    samples: int
+
+
+class SnapshotRecordedResponse(BaseModel):
+    account_hash: str
+    underlyings_recorded: int
+
+
+class SchedulerStatusResponse(BaseModel):
+    tracked_accounts: list[str]
+    interval_seconds: int
+    next_run: datetime | None
+    last_run: datetime | None
+    job_running: bool
+
+
+class TrackedAccountsResponse(BaseModel):
+    tracked_accounts: list[str]

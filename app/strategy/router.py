@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.strategy import service
+from app.strategy import service, scheduler
 from app.strategy.aggregator import AccountDeltaSummary
 from app.strategy.schemas import (
     AccountDeltaSummaryResponse, UnderlyingDeltaResponse, LegBreakdownResponse,
+    DeltaEmaResponse, SnapshotRecordedResponse, SchedulerStatusResponse,
+    TrackedAccountsResponse,
 )
 from app.account import service as account_service
 from app.core.database import get_db
@@ -50,6 +52,96 @@ async def get_delta_for_underlying_by_alias(
     account_hash = await _resolve_alias(account_alias, db)
     summary = await service.build_delta_summary(account_hash, db, underlying_filter=underlying)
     return _single_underlying(summary, account_hash, underlying)
+
+
+# ---------------------------------------------------------------------------
+# Delta history snapshots
+# ---------------------------------------------------------------------------
+
+@router.post("/{account_hash}/snapshots", response_model=SnapshotRecordedResponse)
+async def record_snapshot(account_hash: str, db: AsyncSession = Depends(get_db)):
+    await _assert_account_exists(account_hash, db)
+    rows = await service.record_delta_snapshot(account_hash, db)
+    return SnapshotRecordedResponse(account_hash=account_hash, underlyings_recorded=len(rows))
+
+
+@router.post("/by-alias/{account_alias}/snapshots", response_model=SnapshotRecordedResponse)
+async def record_snapshot_by_alias(account_alias: str, db: AsyncSession = Depends(get_db)):
+    account_hash = await _resolve_alias(account_alias, db)
+    rows = await service.record_delta_snapshot(account_hash, db)
+    return SnapshotRecordedResponse(account_hash=account_hash, underlyings_recorded=len(rows))
+
+
+# ---------------------------------------------------------------------------
+# EMA-smoothed short-call delta
+# ---------------------------------------------------------------------------
+
+@router.get("/{account_hash}/{underlying}/delta-ema", response_model=DeltaEmaResponse)
+async def get_delta_ema(
+    account_hash: str,
+    underlying: str,
+    span: int = Query(default=10, ge=1, description="EMA span in samples"),
+    lookback: int = Query(default=200, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    await _assert_account_exists(account_hash, db)
+    return DeltaEmaResponse(**await service.get_delta_ema(account_hash, underlying, db, span, lookback))
+
+
+@router.get("/by-alias/{account_alias}/{underlying}/delta-ema", response_model=DeltaEmaResponse)
+async def get_delta_ema_by_alias(
+    account_alias: str,
+    underlying: str,
+    span: int = Query(default=10, ge=1),
+    lookback: int = Query(default=200, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+):
+    account_hash = await _resolve_alias(account_alias, db)
+    return DeltaEmaResponse(**await service.get_delta_ema(account_hash, underlying, db, span, lookback))
+
+
+# ---------------------------------------------------------------------------
+# Snapshot scheduler / tracked accounts
+# ---------------------------------------------------------------------------
+
+@router.get("/scheduler/status", response_model=SchedulerStatusResponse)
+async def scheduler_status():
+    return SchedulerStatusResponse(**scheduler.get_scheduler_status())
+
+
+@router.post("/scheduler/run-now")
+async def run_snapshot_now(db: AsyncSession = Depends(get_db)):
+    accounts = scheduler.get_tracked_accounts()
+    if not accounts:
+        raise HTTPException(status_code=400, detail="No tracked accounts. Add one via POST /strategy/tracked-accounts.")
+    total = 0
+    for h in accounts:
+        rows = await service.record_delta_snapshot(h, db)
+        total += len(rows)
+    return {"accounts": accounts, "underlyings_recorded": total}
+
+
+@router.get("/tracked-accounts", response_model=TrackedAccountsResponse)
+async def list_tracked_accounts():
+    return TrackedAccountsResponse(tracked_accounts=scheduler.get_tracked_accounts())
+
+
+@router.post("/tracked-accounts", response_model=TrackedAccountsResponse)
+async def add_tracked_account(
+    account_hash: str = Query(description="Account hash to track for delta snapshots"),
+    db: AsyncSession = Depends(get_db),
+):
+    await _assert_account_exists(account_hash, db)
+    scheduler.add_tracked_account(account_hash)
+    return TrackedAccountsResponse(tracked_accounts=scheduler.get_tracked_accounts())
+
+
+@router.delete("/tracked-accounts", response_model=TrackedAccountsResponse)
+async def remove_tracked_account(
+    account_hash: str = Query(description="Account hash to stop tracking"),
+):
+    scheduler.remove_tracked_account(account_hash)
+    return TrackedAccountsResponse(tracked_accounts=scheduler.get_tracked_accounts())
 
 
 # ---------------------------------------------------------------------------

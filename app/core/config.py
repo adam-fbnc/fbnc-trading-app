@@ -19,5 +19,8 @@ class Settings(BaseSettings):
     sql_echo: bool = False           # echo all SQL statements when True
     log_request_body: bool = False   # include request bodies in access logs (verbose)
 
+    # Strategy
+    strategy_snapshot_interval_seconds: int = 60  # delta-snapshot polling cadence
+
 
 settings = Settings()
