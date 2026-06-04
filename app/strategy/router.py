@@ -12,6 +12,10 @@ from app.core.database import get_db
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 
 
+# ---------------------------------------------------------------------------
+# Whole-account: per-underlying breakdown (one entry per ticker)
+# ---------------------------------------------------------------------------
+
 @router.get("/{account_hash}/delta-summary", response_model=AccountDeltaSummaryResponse)
 async def get_delta_summary(account_hash: str, db: AsyncSession = Depends(get_db)):
     await _assert_account_exists(account_hash, db)
@@ -27,6 +31,28 @@ async def get_delta_summary_by_alias(account_alias: str, db: AsyncSession = Depe
 
 
 # ---------------------------------------------------------------------------
+# Single ticker: that underlying's shares + option legs and its net delta
+# ---------------------------------------------------------------------------
+
+@router.get("/{account_hash}/delta-summary/{underlying}", response_model=UnderlyingDeltaResponse)
+async def get_delta_for_underlying(
+    account_hash: str, underlying: str, db: AsyncSession = Depends(get_db)
+):
+    await _assert_account_exists(account_hash, db)
+    summary = await service.build_delta_summary(account_hash, db, underlying_filter=underlying)
+    return _single_underlying(summary, account_hash, underlying)
+
+
+@router.get("/by-alias/{account_alias}/delta-summary/{underlying}", response_model=UnderlyingDeltaResponse)
+async def get_delta_for_underlying_by_alias(
+    account_alias: str, underlying: str, db: AsyncSession = Depends(get_db)
+):
+    account_hash = await _resolve_alias(account_alias, db)
+    summary = await service.build_delta_summary(account_hash, db, underlying_filter=underlying)
+    return _single_underlying(summary, account_hash, underlying)
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -34,26 +60,40 @@ def _to_response(account_hash: str, summary: AccountDeltaSummary) -> AccountDelt
     return AccountDeltaSummaryResponse(
         account_hash=account_hash,
         total_net_delta=summary.total_net_delta,
-        underlyings=[
-            UnderlyingDeltaResponse(
-                underlying=u.underlying,
-                spot=u.spot,
-                shares=u.shares,
-                net_delta=u.net_delta,
-                short_call_delta=u.short_call_delta,
-                long_put_delta=u.long_put_delta,
-                incomplete=u.incomplete,
-                legs=[
-                    LegBreakdownResponse(
-                        symbol=l.symbol, asset_type=l.asset_type, contract_type=l.contract_type,
-                        strike=l.strike, expiration=l.expiration, quantity=l.quantity,
-                        delta=l.delta, delta_contribution=l.delta_contribution,
-                        delta_source=l.delta_source,
-                    )
-                    for l in u.legs
-                ],
+        underlyings=[_underlying_to_response(u) for u in summary.underlyings],
+    )
+
+
+def _single_underlying(
+    summary: AccountDeltaSummary, account_hash: str, underlying: str
+) -> UnderlyingDeltaResponse:
+    for u in summary.underlyings:
+        if u.underlying.upper() == underlying.upper():
+            return _underlying_to_response(u)
+    raise HTTPException(
+        status_code=404,
+        detail=f"No position for '{underlying.upper()}' in account. "
+               f"Sync positions first, or check the ticker.",
+    )
+
+
+def _underlying_to_response(u) -> UnderlyingDeltaResponse:
+    return UnderlyingDeltaResponse(
+        underlying=u.underlying,
+        spot=u.spot,
+        shares=u.shares,
+        net_delta=u.net_delta,
+        short_call_delta=u.short_call_delta,
+        long_put_delta=u.long_put_delta,
+        incomplete=u.incomplete,
+        legs=[
+            LegBreakdownResponse(
+                symbol=l.symbol, asset_type=l.asset_type, contract_type=l.contract_type,
+                strike=l.strike, expiration=l.expiration, quantity=l.quantity,
+                delta=l.delta, delta_contribution=l.delta_contribution,
+                delta_source=l.delta_source,
             )
-            for u in summary.underlyings
+            for l in u.legs
         ],
     )
 

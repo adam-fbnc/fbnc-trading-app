@@ -14,7 +14,17 @@ logger = logging.getLogger("app.strategy")
 _EQUITY_TYPES = {"EQUITY", "ETF", "COLLECTIVE_INVESTMENT", "INDEX"}
 
 
-async def build_delta_summary(account_hash: str, db: AsyncSession) -> AccountDeltaSummary:
+async def build_delta_summary(
+    account_hash: str,
+    db: AsyncSession,
+    underlying_filter: str | None = None,
+) -> AccountDeltaSummary:
+    """
+    Build per-underlying delta breakdown for an account.
+
+    If underlying_filter is given (e.g. "NVDA"), only that ticker's legs are
+    included and only its symbols are quoted.
+    """
     # Structure comes from the already-synced positions table.
     result = await db.execute(
         select(Position).where(Position.account_hash == account_hash)
@@ -24,11 +34,10 @@ async def build_delta_summary(account_hash: str, db: AsyncSession) -> AccountDel
         logger.info("No positions for account %s; returning empty delta summary", account_hash)
         return AccountDeltaSummary(underlyings=[], total_net_delta=Decimal("0"))
 
-    # Build leg metadata and collect symbols needing live quotes.
-    legs_meta: list[dict] = []
-    option_symbols: set[str] = set()
-    underlyings: set[str] = set()
+    target = underlying_filter.upper() if underlying_filter else None
 
+    # Build leg metadata, then optionally filter to one underlying.
+    legs_meta: list[dict] = []
     for pos in positions:
         asset_type = (pos.asset_type or "").upper()
         if asset_type == "OPTION":
@@ -37,8 +46,6 @@ async def build_delta_summary(account_hash: str, db: AsyncSession) -> AccountDel
                 logger.warning("Could not parse option position %s; skipping", pos.symbol)
                 continue
             legs_meta.append(meta)
-            option_symbols.add(pos.symbol)
-            underlyings.add(meta["underlying"])
         else:
             legs_meta.append({
                 "symbol": pos.symbol,
@@ -49,9 +56,14 @@ async def build_delta_summary(account_hash: str, db: AsyncSession) -> AccountDel
                 "strike": None,
                 "expiration": None,
             })
-            underlyings.add(pos.symbol)
 
-    # One live quotes call for all option legs + underlyings (Greeks + spot).
+    if target is not None:
+        legs_meta = [m for m in legs_meta if m["underlying"].upper() == target]
+
+    option_symbols = {m["symbol"] for m in legs_meta if m["contract_type"] is not None}
+    underlyings = {m["underlying"] for m in legs_meta}
+
+    # One live quotes call for the (possibly filtered) option legs + underlyings.
     quote_symbols = sorted(option_symbols | underlyings)
     quotes = _fetch_quotes(quote_symbols)
 
