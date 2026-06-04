@@ -10,6 +10,7 @@ from app.market.router import router as market_router
 from app.orders.router import router as orders_router
 from app.streaming.router import router as stream_router
 from app.gex.router import router as gex_router
+from app.strategy.router import router as strategy_router
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -55,6 +56,7 @@ app.include_router(market_router)
 app.include_router(orders_router)
 app.include_router(stream_router)
 app.include_router(gex_router)
+app.include_router(strategy_router)
 
 
 @app.get("/health")
