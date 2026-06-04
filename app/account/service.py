@@ -57,6 +57,23 @@ async def list_accounts(db: AsyncSession) -> list[Account]:
     return list(result.scalars().all())
 
 
+async def get_account_hash_by_alias(account_alias: str, db: AsyncSession) -> str | None:
+    """
+    Resolve a human-friendly account_alias to its account_hash.
+
+    Returns None if no account has the alias. Raises ValueError if more than
+    one account shares the alias (aliases are populated manually and are not
+    DB-enforced unique).
+    """
+    result = await db.execute(
+        select(Account).where(Account.account_alias == account_alias)
+    )
+    accounts = list(result.scalars().all())
+    if len(accounts) > 1:
+        raise ValueError(f"Multiple accounts share alias '{account_alias}'; aliases must be unique")
+    return accounts[0].account_hash if accounts else None
+
+
 async def get_account_summary(account_hash: str, db: AsyncSession) -> AccountSnapshot:
     client = get_schwab_client()
     response = client.account_details(account_hash, fields="positions")
