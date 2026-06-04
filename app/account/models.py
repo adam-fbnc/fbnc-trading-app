@@ -14,6 +14,8 @@ class Account(Base):
     account_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False, index=True)
     account_number: Mapped[str | None] = mapped_column(String, nullable=True)
     account_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Human-friendly label, populated manually; never overwritten by sync.
+    account_alias: Mapped[str | None] = mapped_column(String, nullable=True)
     raw: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

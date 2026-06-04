@@ -8,6 +8,7 @@ class AccountResponse(BaseModel):
     account_hash: str
     account_number: str | None
     account_type: str | None
+    account_alias: str | None
     created_at: datetime
     updated_at: datetime
 
