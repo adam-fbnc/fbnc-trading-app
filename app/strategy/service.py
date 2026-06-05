@@ -6,9 +6,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.account.models import Position
+from app.core.config import settings
 from app.core.schwab_client import get_schwab_client
 from app.strategy.aggregator import LegInput, AccountDeltaSummary, aggregate
-from app.strategy.ema import compute_ema
+from app.strategy.moving_averages import compute_ma
 from app.strategy.models import DeltaSnapshot
 
 logger = logging.getLogger("app.strategy")
@@ -142,19 +143,28 @@ async def record_delta_snapshot(account_hash: str, db: AsyncSession) -> list[Del
     return rows
 
 
-async def get_delta_ema(
+async def get_smoothed_delta(
     account_hash: str,
     underlying: str,
     db: AsyncSession,
+    ma_type: str = "ema",
+    window_minutes: float | None = None,
+    timeframe_minutes: float | None = None,
     span: int = 10,
-    lookback: int = 200,
+    lookback: int = 500,
 ) -> dict:
     """
-    EMA of the *current* short call's delta for one (account, underlying).
+    Smoothed short-call delta for one (account, underlying), using a configurable
+    moving average over the *current* short-call contract's recent run (so a roll
+    starts a fresh window).
 
-    Pulls up to `lookback` most-recent snapshots, restricts to the run matching
-    the latest short_call_symbol (so a roll starts a fresh smoothing window),
-    and returns current vs. EMA-smoothed delta.
+    Parameters
+    ----------
+    ma_type            : "ema" | "hma" | "kama"
+    timeframe_minutes  : resample snapshots into bars of this size (last value per
+                         bar). Defaults to the snapshot interval (no resampling).
+    window_minutes     : time length of the average; converted to bars/samples via
+                         the timeframe. If omitted, `span` (in samples) is used.
     """
     underlying = underlying.upper()
     result = await db.execute(
@@ -167,33 +177,63 @@ async def get_delta_ema(
         .limit(lookback)
     )
     rows = list(result.scalars().all())  # newest first
+
+    interval_min = max(5, settings.strategy_snapshot_interval_seconds) / 60.0
+    bar_min = timeframe_minutes if timeframe_minutes and timeframe_minutes > 0 else interval_min
+
+    base = {
+        "underlying": underlying, "short_call_symbol": None,
+        "ma_type": ma_type.lower(), "window_minutes": window_minutes,
+        "timeframe_minutes": bar_min, "period": None,
+        "current_delta": None, "smoothed_delta": None, "samples": 0,
+    }
     if not rows:
-        return {
-            "underlying": underlying, "short_call_symbol": None,
-            "current_delta": None, "ema_delta": None, "span": span, "samples": 0,
-        }
+        return base
 
     current_symbol = rows[0].short_call_symbol
-    # Keep only the contiguous newest run for the current short call contract
-    series_desc = []
+    # Contiguous newest run for the current short-call contract, oldest -> newest
+    run = []
     for r in rows:
         if r.short_call_symbol != current_symbol:
             break
         if r.short_call_delta is not None:
-            series_desc.append(r.short_call_delta)
+            run.append((r.recorded_at, r.short_call_delta))
+    run.reverse()
 
-    series = list(reversed(series_desc))  # oldest -> newest
-    ema = compute_ema(series, span)
+    series = _resample_last(run, bar_min) if (timeframe_minutes and timeframe_minutes > 0) else [d for _, d in run]
+
+    if window_minutes and window_minutes > 0:
+        period = max(1, round(window_minutes / bar_min))
+    else:
+        period = span
+
+    smoothed = compute_ma(series, period, ma_type)
     current = series[-1] if series else None
 
-    return {
-        "underlying": underlying,
+    base.update({
         "short_call_symbol": current_symbol,
+        "period": period,
         "current_delta": current,
-        "ema_delta": ema,
-        "span": span,
+        "smoothed_delta": smoothed,
         "samples": len(series),
-    }
+    })
+    return base
+
+
+def _resample_last(points: list[tuple], bar_minutes: float) -> list:
+    """Bucket (timestamp, value) points into bars of bar_minutes; keep the last
+    value in each bar. Input ordered oldest -> newest; output ordered the same."""
+    if not points:
+        return []
+    bucket_secs = bar_minutes * 60.0
+    buckets: dict[int, object] = {}
+    order: list[int] = []
+    for ts, val in points:
+        key = int(ts.timestamp() // bucket_secs)
+        if key not in buckets:
+            order.append(key)
+        buckets[key] = val  # last wins
+    return [buckets[k] for k in order]
 
 
 # ---------------------------------------------------------------------------
