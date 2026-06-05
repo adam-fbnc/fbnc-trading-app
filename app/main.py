@@ -21,7 +21,8 @@ async def lifespan(app: FastAPI):
     # Startup
     from app.streaming.manager import start_stream, subscribe_account_activity
     from app.streaming.db_worker import start_db_worker
-    from app.gex.scheduler import start_scheduler
+    from app.gex.scheduler import start_scheduler as start_gex_scheduler
+    from app.strategy.scheduler import start_scheduler as start_strategy_scheduler
     try:
         start_db_worker()
         start_stream()
@@ -30,21 +31,28 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("Could not auto-start stream on boot: %s", e)
     try:
-        start_scheduler()
+        start_gex_scheduler()
         logger.info("OI snapshot scheduler started on boot")
     except Exception as e:
         logger.warning("Could not start OI scheduler: %s", e)
+    try:
+        start_strategy_scheduler()
+        logger.info("Delta-snapshot scheduler started on boot")
+    except Exception as e:
+        logger.warning("Could not start delta-snapshot scheduler: %s", e)
 
     yield
 
     # Shutdown
     from app.streaming.manager import stop_stream
     from app.streaming.db_worker import stop_db_worker
-    from app.gex.scheduler import stop_scheduler
+    from app.gex.scheduler import stop_scheduler as stop_gex_scheduler
+    from app.strategy.scheduler import stop_scheduler as stop_strategy_scheduler
     stop_stream()
     stop_db_worker()
-    stop_scheduler()
-    logger.info("Stream, DB worker, and scheduler stopped on shutdown")
+    stop_gex_scheduler()
+    stop_strategy_scheduler()
+    logger.info("Stream, DB worker, and schedulers stopped on shutdown")
 
 
 app = FastAPI(title="Schwab Trading API", version="0.1.0", lifespan=lifespan)

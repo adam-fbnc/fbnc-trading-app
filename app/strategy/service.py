@@ -1,5 +1,5 @@
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -8,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.account.models import Position
 from app.core.schwab_client import get_schwab_client
 from app.strategy.aggregator import LegInput, AccountDeltaSummary, aggregate
+from app.strategy.ema import compute_ema
+from app.strategy.models import DeltaSnapshot
 
 logger = logging.getLogger("app.strategy")
 
@@ -97,6 +99,101 @@ async def build_delta_summary(
         account_hash, len(summary.underlyings), summary.total_net_delta,
     )
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Delta history (snapshots)
+# ---------------------------------------------------------------------------
+
+async def record_delta_snapshot(account_hash: str, db: AsyncSession) -> list[DeltaSnapshot]:
+    """
+    Compute the current delta summary and persist one row per underlying.
+    Returns the rows written.
+    """
+    summary = await build_delta_summary(account_hash, db)
+    now = datetime.now(timezone.utc)
+    rows: list[DeltaSnapshot] = []
+
+    for u in summary.underlyings:
+        short_call_symbol = None
+        for leg in u.legs:
+            if leg.contract_type == "CALL" and leg.quantity < 0 and leg.delta is not None:
+                # Track the short call with the highest |delta| (most ITM)
+                if short_call_symbol is None or (
+                    u.short_call_delta is not None and leg.delta == u.short_call_delta
+                ):
+                    short_call_symbol = leg.symbol
+
+        row = DeltaSnapshot(
+            account_hash=account_hash,
+            underlying=u.underlying,
+            spot=u.spot,
+            net_delta=u.net_delta,
+            short_call_symbol=short_call_symbol,
+            short_call_delta=u.short_call_delta,
+            long_put_delta=u.long_put_delta,
+            recorded_at=now,
+        )
+        db.add(row)
+        rows.append(row)
+
+    await db.commit()
+    logger.info("Recorded %d delta snapshot row(s) for account %s", len(rows), account_hash)
+    return rows
+
+
+async def get_delta_ema(
+    account_hash: str,
+    underlying: str,
+    db: AsyncSession,
+    span: int = 10,
+    lookback: int = 200,
+) -> dict:
+    """
+    EMA of the *current* short call's delta for one (account, underlying).
+
+    Pulls up to `lookback` most-recent snapshots, restricts to the run matching
+    the latest short_call_symbol (so a roll starts a fresh smoothing window),
+    and returns current vs. EMA-smoothed delta.
+    """
+    underlying = underlying.upper()
+    result = await db.execute(
+        select(DeltaSnapshot)
+        .where(
+            DeltaSnapshot.account_hash == account_hash,
+            DeltaSnapshot.underlying == underlying,
+        )
+        .order_by(DeltaSnapshot.recorded_at.desc())
+        .limit(lookback)
+    )
+    rows = list(result.scalars().all())  # newest first
+    if not rows:
+        return {
+            "underlying": underlying, "short_call_symbol": None,
+            "current_delta": None, "ema_delta": None, "span": span, "samples": 0,
+        }
+
+    current_symbol = rows[0].short_call_symbol
+    # Keep only the contiguous newest run for the current short call contract
+    series_desc = []
+    for r in rows:
+        if r.short_call_symbol != current_symbol:
+            break
+        if r.short_call_delta is not None:
+            series_desc.append(r.short_call_delta)
+
+    series = list(reversed(series_desc))  # oldest -> newest
+    ema = compute_ema(series, span)
+    current = series[-1] if series else None
+
+    return {
+        "underlying": underlying,
+        "short_call_symbol": current_symbol,
+        "current_delta": current,
+        "ema_delta": ema,
+        "span": span,
+        "samples": len(series),
+    }
 
 
 # ---------------------------------------------------------------------------
