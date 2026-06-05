@@ -44,11 +44,12 @@ def stop_stream() -> None:
         logger.info("Stream stopped")
 
 
-def subscribe_quotes(symbols: list[str], fields: str = "0,1,2,3,4,5,6,7,8") -> None:
+def subscribe_quotes(symbols: list[str], fields: str | None = None) -> None:
     """Subscribe to Level 1 equity quotes."""
+    from app.streaming.fields import EQUITY_STREAM_FIELDS
     _require_running()
     keys = ",".join(s.upper() for s in symbols)
-    _stream.send(_stream.level_one_equities(keys, fields))
+    _stream.send(_stream.level_one_equities(keys, fields or EQUITY_STREAM_FIELDS))
     stream_state.add_subscription("LEVELONE_EQUITIES", symbols)
     logger.info("Subscribed to equity quotes: %s", keys)
 
@@ -61,13 +62,14 @@ def unsubscribe_quotes(symbols: list[str]) -> None:
     logger.info("Unsubscribed from equity quotes: %s", keys)
 
 
-def subscribe_options(symbols: list[str], fields: str = "0,1,2,3,4,5,6,7,8,9,10,11,12,13") -> None:
-    """Subscribe to Level 1 option quotes."""
+def subscribe_options(symbols: list[str], fields: str | None = None) -> None:
+    """Subscribe to Level 1 option quotes (includes Greeks)."""
+    from app.streaming.fields import OPTION_STREAM_FIELDS
     _require_running()
     keys = ",".join(s.upper() for s in symbols)
-    _stream.send(_stream.level_one_options(keys, fields))
+    _stream.send(_stream.level_one_options(keys, fields or OPTION_STREAM_FIELDS))
     stream_state.add_subscription("LEVELONE_OPTIONS", symbols)
-    logger.info("Subscribed to option quotes: %s", keys)
+    logger.info("Subscribed to option quotes (greeks): %s", keys)
 
 
 def unsubscribe_options(symbols: list[str]) -> None:
