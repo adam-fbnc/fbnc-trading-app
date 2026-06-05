@@ -32,12 +32,15 @@ class AccountDeltaSummaryResponse(BaseModel):
     underlyings: list[UnderlyingDeltaResponse]
 
 
-class DeltaEmaResponse(BaseModel):
+class SmoothedDeltaResponse(BaseModel):
     underlying: str
     short_call_symbol: str | None
+    ma_type: str
+    window_minutes: float | None
+    timeframe_minutes: float | None
+    period: int | None
     current_delta: Decimal | None
-    ema_delta: Decimal | None
-    span: int
+    smoothed_delta: Decimal | None
     samples: int
 
 

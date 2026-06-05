@@ -5,9 +5,10 @@ from app.strategy import service, scheduler
 from app.strategy.aggregator import AccountDeltaSummary
 from app.strategy.schemas import (
     AccountDeltaSummaryResponse, UnderlyingDeltaResponse, LegBreakdownResponse,
-    DeltaEmaResponse, SnapshotRecordedResponse, SchedulerStatusResponse,
+    SmoothedDeltaResponse, SnapshotRecordedResponse, SchedulerStatusResponse,
     TrackedAccountsResponse,
 )
+from app.strategy.moving_averages import MA_TYPES
 from app.account import service as account_service
 from app.core.database import get_db
 
@@ -73,31 +74,41 @@ async def record_snapshot_by_alias(account_alias: str, db: AsyncSession = Depend
 
 
 # ---------------------------------------------------------------------------
-# EMA-smoothed short-call delta
+# Smoothed short-call delta (configurable MA type + time-based window)
 # ---------------------------------------------------------------------------
 
-@router.get("/{account_hash}/{underlying}/delta-ema", response_model=DeltaEmaResponse)
-async def get_delta_ema(
+@router.get("/{account_hash}/{underlying}/smoothed-delta", response_model=SmoothedDeltaResponse)
+async def get_smoothed_delta(
     account_hash: str,
     underlying: str,
-    span: int = Query(default=10, ge=1, description="EMA span in samples"),
-    lookback: int = Query(default=200, ge=1, le=5000),
+    ma_type: str = Query(default="ema", description=f"One of {MA_TYPES}"),
+    window_minutes: float | None = Query(default=None, gt=0, description="Time length of the average"),
+    timeframe_minutes: float | None = Query(default=None, gt=0, description="Resample bar size"),
+    span: int = Query(default=10, ge=1, description="Samples (used if window_minutes omitted)"),
+    lookback: int = Query(default=500, ge=1, le=10000),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_ma_type(ma_type)
     await _assert_account_exists(account_hash, db)
-    return DeltaEmaResponse(**await service.get_delta_ema(account_hash, underlying, db, span, lookback))
+    return SmoothedDeltaResponse(**await service.get_smoothed_delta(
+        account_hash, underlying, db, ma_type, window_minutes, timeframe_minutes, span, lookback))
 
 
-@router.get("/by-alias/{account_alias}/{underlying}/delta-ema", response_model=DeltaEmaResponse)
-async def get_delta_ema_by_alias(
+@router.get("/by-alias/{account_alias}/{underlying}/smoothed-delta", response_model=SmoothedDeltaResponse)
+async def get_smoothed_delta_by_alias(
     account_alias: str,
     underlying: str,
+    ma_type: str = Query(default="ema", description=f"One of {MA_TYPES}"),
+    window_minutes: float | None = Query(default=None, gt=0),
+    timeframe_minutes: float | None = Query(default=None, gt=0),
     span: int = Query(default=10, ge=1),
-    lookback: int = Query(default=200, ge=1, le=5000),
+    lookback: int = Query(default=500, ge=1, le=10000),
     db: AsyncSession = Depends(get_db),
 ):
+    _validate_ma_type(ma_type)
     account_hash = await _resolve_alias(account_alias, db)
-    return DeltaEmaResponse(**await service.get_delta_ema(account_hash, underlying, db, span, lookback))
+    return SmoothedDeltaResponse(**await service.get_smoothed_delta(
+        account_hash, underlying, db, ma_type, window_minutes, timeframe_minutes, span, lookback))
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +199,11 @@ def _underlying_to_response(u) -> UnderlyingDeltaResponse:
             for l in u.legs
         ],
     )
+
+
+def _validate_ma_type(ma_type: str) -> None:
+    if ma_type.lower() not in MA_TYPES:
+        raise HTTPException(status_code=400, detail=f"ma_type must be one of {MA_TYPES}")
 
 
 async def _assert_account_exists(account_hash: str, db: AsyncSession) -> None:
