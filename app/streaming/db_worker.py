@@ -42,9 +42,12 @@ def _run() -> None:
         while not _stop_event.is_set():
             try:
                 event_type, payload = db_write_queue.get(timeout=1.0)
-                _persist_event(cur, event_type, payload)
+                if event_type != "PNL_ALERT":
+                    _persist_event(cur, event_type, payload)
                 if event_type == "ACCT_ACTIVITY":
                     _process_account_activity(cur, payload)
+                elif event_type == "PNL_ALERT":
+                    _process_pnl_alert(cur, payload)
             except Exception:
                 pass  # timeout or empty queue — loop again
     except Exception as e:
@@ -104,3 +107,29 @@ def _process_account_activity(cur, payload: dict) -> None:
         logger.info("Account activity: %s order %s → %s", msg_type, order_id, new_status)
     except Exception as e:
         logger.warning("Failed to process account activity event: %s", e)
+
+
+def _process_pnl_alert(cur, payload: dict) -> None:
+    """Persist a triggered P&L alert: stamp triggered_at, deactivate, and log."""
+    try:
+        alert_id = payload["alert_id"]
+        group_id = payload["group_id"]
+        alert_type = payload["alert_type"]
+        pnl_pct = float(payload["pnl_pct"])
+        symbol = payload["symbol"]
+        now = datetime.now(timezone.utc)
+
+        cur.execute(
+            """
+            UPDATE group_alerts
+            SET triggered_at = %s, is_active = false
+            WHERE id = %s AND triggered_at IS NULL
+            """,
+            (now, alert_id),
+        )
+        logger.warning(
+            "P&L ALERT | group=%d alert=%d type=%s pnl=%.2f%% symbol=%s",
+            group_id, alert_id, alert_type, pnl_pct, symbol,
+        )
+    except Exception as e:
+        logger.warning("Failed to process PNL_ALERT event: %s", e)
