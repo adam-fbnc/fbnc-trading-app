@@ -46,12 +46,14 @@ def _route(service: str, contents: list[dict]) -> None:
 
 
 def _handle_quotes(service: str, contents: list[dict]) -> None:
+    from app.streaming.fields import translate
     for item in contents:
         symbol = item.get("key", "")
         if not symbol:
             continue
-        fields = {k: v for k, v in item.items() if k != "key"}
-        stream_state.update_quote(symbol, fields)
+        raw = {k: v for k, v in item.items() if k != "key"}
+        # Map numeric Schwab fields to named greeks/prices (raw kept as f_*).
+        stream_state.update_quote(symbol, translate(service, raw))
 
 
 def _handle_account_activity(contents: list[dict]) -> None:

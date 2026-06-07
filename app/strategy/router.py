@@ -9,6 +9,8 @@ from app.strategy.schemas import (
     TrackedAccountsResponse,
 )
 from app.strategy.moving_averages import MA_TYPES
+from app.strategy import streaming as strategy_streaming
+from app.streaming.state import stream_state
 from app.account import service as account_service
 from app.core.database import get_db
 
@@ -153,6 +155,43 @@ async def remove_tracked_account(
 ):
     scheduler.remove_tracked_account(account_hash)
     return TrackedAccountsResponse(tracked_accounts=scheduler.get_tracked_accounts())
+
+
+# ---------------------------------------------------------------------------
+# Streaming (live Greeks)
+# ---------------------------------------------------------------------------
+
+@router.post("/{account_hash}/stream/subscribe")
+async def subscribe_account_stream(account_hash: str, db: AsyncSession = Depends(get_db)):
+    await _assert_account_exists(account_hash, db)
+    try:
+        counts = await strategy_streaming.subscribe_account(account_hash, db)
+    except RuntimeError as e:  # stream not running
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"account_hash": account_hash, "subscribed": counts}
+
+
+@router.post("/by-alias/{account_alias}/stream/subscribe")
+async def subscribe_account_stream_by_alias(account_alias: str, db: AsyncSession = Depends(get_db)):
+    account_hash = await _resolve_alias(account_alias, db)
+    try:
+        counts = await strategy_streaming.subscribe_account(account_hash, db)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"account_hash": account_hash, "subscribed": counts}
+
+
+@router.get("/stream/quote/{symbol}")
+async def inspect_stream_quote(symbol: str):
+    """Dump the latest live-streamed fields for a symbol (named greeks + raw
+    f_* numeric fields) to verify Schwab field mappings empirically."""
+    data = stream_state.get_quote(symbol.upper())
+    if data is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No streamed data for '{symbol.upper()}'. Subscribe first and wait for a tick during market hours.",
+        )
+    return {"symbol": symbol.upper(), "data": data}
 
 
 # ---------------------------------------------------------------------------

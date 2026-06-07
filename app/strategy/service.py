@@ -11,6 +11,7 @@ from app.core.schwab_client import get_schwab_client
 from app.strategy.aggregator import LegInput, AccountDeltaSummary, aggregate
 from app.strategy.moving_averages import compute_ma
 from app.strategy.models import DeltaSnapshot
+from app.strategy.streaming import get_live_greek
 
 logger = logging.getLogger("app.strategy")
 
@@ -21,12 +22,18 @@ async def build_delta_summary(
     account_hash: str,
     db: AsyncSession,
     underlying_filter: str | None = None,
+    source: str = "auto",
 ) -> AccountDeltaSummary:
     """
     Build per-underlying delta breakdown for an account.
 
     If underlying_filter is given (e.g. "NVDA"), only that ticker's legs are
     included and only its symbols are quoted.
+
+    source:
+      "auto"   - prefer live stream cache, fall back to on-demand quotes
+      "stream" - stream cache only (no API call; missing -> incomplete)
+      "quote"  - on-demand quotes only
     """
     # Structure comes from the already-synced positions table.
     result = await db.execute(
@@ -66,22 +73,48 @@ async def build_delta_summary(
     option_symbols = {m["symbol"] for m in legs_meta if m["contract_type"] is not None}
     underlyings = {m["underlying"] for m in legs_meta}
 
-    # One live quotes call for the (possibly filtered) option legs + underlyings.
-    quote_symbols = sorted(option_symbols | underlyings)
-    quotes = _fetch_quotes(quote_symbols)
+    use_stream = source in ("auto", "stream")
+    allow_quote = source in ("auto", "quote")
 
-    spots: dict[str, Decimal | None] = {
-        u: _spot_from_quote(quotes.get(u)) for u in underlyings
-    }
+    # Pass 1: try the live stream cache for option deltas and underlying spots.
+    option_delta: dict[str, tuple] = {}  # symbol -> (Decimal|None, src)
+    spots: dict[str, Decimal | None] = {}
+    need_quote: set[str] = set()
+
+    for sym in option_symbols:
+        d = get_live_greek(sym, "delta") if use_stream else None
+        if d is not None:
+            option_delta[sym] = (d, "stream")
+        elif allow_quote:
+            need_quote.add(sym)
+        else:
+            option_delta[sym] = (None, "none")
+
+    for u in underlyings:
+        s = get_live_greek(u, "last") if use_stream else None
+        if s is not None:
+            spots[u] = s
+        else:
+            spots[u] = None
+            if allow_quote:
+                need_quote.add(u)
+
+    # Pass 2: one quotes call for whatever the stream didn't cover.
+    quotes = _fetch_quotes(sorted(need_quote)) if need_quote else {}
+    for sym in option_symbols:
+        if sym not in option_delta:
+            d = _delta_from_quote(quotes.get(sym))
+            option_delta[sym] = (d, "quote" if d is not None else "none")
+    for u in underlyings:
+        if spots.get(u) is None and u in quotes:
+            spots[u] = _spot_from_quote(quotes.get(u))
 
     legs: list[LegInput] = []
     for m in legs_meta:
-        delta = None
-        source = "none"
-        if m["contract_type"] is not None:  # option
-            q = quotes.get(m["symbol"])
-            delta = _delta_from_quote(q)
-            source = "quote" if delta is not None else "none"
+        if m["contract_type"] is not None:
+            delta, src = option_delta.get(m["symbol"], (None, "none"))
+        else:
+            delta, src = None, "equity"
         legs.append(LegInput(
             symbol=m["symbol"],
             asset_type=m["asset_type"],
@@ -91,7 +124,7 @@ async def build_delta_summary(
             strike=m["strike"],
             expiration=m["expiration"],
             delta=delta,
-            delta_source=source if m["contract_type"] else "equity",
+            delta_source=src,
         ))
 
     summary = aggregate(legs, spots)
