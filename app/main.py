@@ -11,6 +11,7 @@ from app.orders.router import router as orders_router
 from app.streaming.router import router as stream_router
 from app.gex.router import router as gex_router
 from app.strategy.router import router as strategy_router
+from app.pnl.router import router as pnl_router
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -40,6 +41,14 @@ async def lifespan(app: FastAPI):
         logger.info("Delta-snapshot scheduler started on boot")
     except Exception as e:
         logger.warning("Could not start delta-snapshot scheduler: %s", e)
+    try:
+        from app.core.database import AsyncSessionLocal
+        from app.pnl.service import load_open_groups
+        async with AsyncSessionLocal() as db:
+            n = await load_open_groups(db)
+        logger.info("PnL state loaded: %d open group(s)", n)
+    except Exception as e:
+        logger.warning("Could not load open position groups: %s", e)
 
     yield
 
@@ -65,6 +74,7 @@ app.include_router(orders_router)
 app.include_router(stream_router)
 app.include_router(gex_router)
 app.include_router(strategy_router)
+app.include_router(pnl_router)
 
 
 @app.get("/health")

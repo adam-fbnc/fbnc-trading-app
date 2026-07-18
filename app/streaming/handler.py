@@ -54,6 +54,28 @@ def _handle_quotes(service: str, contents: list[dict]) -> None:
         raw = {k: v for k, v in item.items() if k != "key"}
         # Map numeric Schwab fields to named greeks/prices (raw kept as f_*).
         stream_state.update_quote(symbol, translate(service, raw))
+        if service == "LEVELONE_OPTIONS":
+            _check_pnl_alerts(symbol)
+
+
+def _check_pnl_alerts(symbol: str) -> None:
+    """Check P&L thresholds for any groups containing this symbol. Non-blocking."""
+    try:
+        from app.pnl.service import check_alerts_for_symbol
+        triggered = check_alerts_for_symbol(symbol)
+        for group_id, alert_id, alert_type, pnl_pct in triggered:
+            try:
+                db_write_queue.put_nowait(("PNL_ALERT", {
+                    "group_id": group_id,
+                    "alert_id": alert_id,
+                    "alert_type": alert_type,
+                    "pnl_pct": str(pnl_pct),
+                    "symbol": symbol,
+                }))
+            except queue.Full:
+                logger.warning("DB write queue full — dropping PNL_ALERT for group %d", group_id)
+    except Exception as e:
+        logger.warning("PnL alert check error for %s: %s", symbol, e)
 
 
 def _handle_account_activity(contents: list[dict]) -> None:
