@@ -9,12 +9,10 @@
 
 ## 1. PostgreSQL Setup
 
-Choose either option. Both use the same connection string:
+Install PostgreSQL locally. Connection string:
 ```
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/schwab_trading
 ```
-
-### Option A — Direct Install (Recommended)
 
 1. Download the installer from [postgresql.org/download/windows](https://www.postgresql.org/download/windows/)
 2. Run it with these settings:
@@ -25,16 +23,6 @@ DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/schwab_tradin
    ```sql
    CREATE DATABASE schwab_trading;
    ```
-
-### Option B — Docker
-
-Requires [Docker Desktop](https://www.docker.com/products/docker-desktop/).
-
-```sh
-docker compose up -d
-```
-
-This starts postgres:16-alpine on port 5432 and creates the `schwab_trading` database automatically.
 
 ---
 
