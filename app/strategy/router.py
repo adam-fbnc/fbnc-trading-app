@@ -202,6 +202,8 @@ def _to_response(account_hash: str, summary: AccountDeltaSummary) -> AccountDelt
     return AccountDeltaSummaryResponse(
         account_hash=account_hash,
         total_net_delta=summary.total_net_delta,
+        total_net_gamma=summary.total_net_gamma,
+        total_net_theta=summary.total_net_theta,
         underlyings=[_underlying_to_response(u) for u in summary.underlyings],
     )
 
@@ -225,14 +227,21 @@ def _underlying_to_response(u) -> UnderlyingDeltaResponse:
         spot=u.spot,
         shares=u.shares,
         net_delta=u.net_delta,
+        net_gamma=u.net_gamma,
+        net_theta=u.net_theta,
         short_call_delta=u.short_call_delta,
+        short_call_theta=u.short_call_theta,
         long_put_delta=u.long_put_delta,
+        long_put_theta=u.long_put_theta,
         incomplete=u.incomplete,
         legs=[
             LegBreakdownResponse(
                 symbol=l.symbol, asset_type=l.asset_type, contract_type=l.contract_type,
                 strike=l.strike, expiration=l.expiration, quantity=l.quantity,
-                delta=l.delta, delta_contribution=l.delta_contribution,
+                delta=l.delta, gamma=l.gamma, theta=l.theta,
+                delta_contribution=l.delta_contribution,
+                gamma_contribution=l.gamma_contribution,
+                theta_contribution=l.theta_contribution,
                 delta_source=l.delta_source,
             )
             for l in u.legs

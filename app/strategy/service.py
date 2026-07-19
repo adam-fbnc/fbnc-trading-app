@@ -76,19 +76,19 @@ async def build_delta_summary(
     use_stream = source in ("auto", "stream")
     allow_quote = source in ("auto", "quote")
 
-    # Pass 1: try the live stream cache for option deltas and underlying spots.
-    option_delta: dict[str, tuple] = {}  # symbol -> (Decimal|None, src)
+    # Pass 1: try the live stream cache for option greeks and underlying spots.
+    option_greeks: dict[str, tuple] = {}  # symbol -> (delta, gamma, theta, src)
     spots: dict[str, Decimal | None] = {}
     need_quote: set[str] = set()
 
     for sym in option_symbols:
         d = get_live_greek(sym, "delta") if use_stream else None
         if d is not None:
-            option_delta[sym] = (d, "stream")
+            option_greeks[sym] = (d, get_live_greek(sym, "gamma"), get_live_greek(sym, "theta"), "stream")
         elif allow_quote:
             need_quote.add(sym)
         else:
-            option_delta[sym] = (None, "none")
+            option_greeks[sym] = (None, None, None, "none")
 
     for u in underlyings:
         s = get_live_greek(u, "last") if use_stream else None
@@ -102,9 +102,13 @@ async def build_delta_summary(
     # Pass 2: one quotes call for whatever the stream didn't cover.
     quotes = _fetch_quotes(sorted(need_quote)) if need_quote else {}
     for sym in option_symbols:
-        if sym not in option_delta:
-            d = _delta_from_quote(quotes.get(sym))
-            option_delta[sym] = (d, "quote" if d is not None else "none")
+        if sym not in option_greeks:
+            q = quotes.get(sym)
+            d = _greek_from_quote(q, "delta")
+            option_greeks[sym] = (
+                d, _greek_from_quote(q, "gamma"), _greek_from_quote(q, "theta"),
+                "quote" if d is not None else "none",
+            )
     for u in underlyings:
         if spots.get(u) is None and u in quotes:
             spots[u] = _spot_from_quote(quotes.get(u))
@@ -112,9 +116,9 @@ async def build_delta_summary(
     legs: list[LegInput] = []
     for m in legs_meta:
         if m["contract_type"] is not None:
-            delta, src = option_delta.get(m["symbol"], (None, "none"))
+            delta, gamma, theta, src = option_greeks.get(m["symbol"], (None, None, None, "none"))
         else:
-            delta, src = None, "equity"
+            delta, gamma, theta, src = None, None, None, "equity"
         legs.append(LegInput(
             symbol=m["symbol"],
             asset_type=m["asset_type"],
@@ -124,13 +128,16 @@ async def build_delta_summary(
             strike=m["strike"],
             expiration=m["expiration"],
             delta=delta,
+            gamma=gamma,
+            theta=theta,
             delta_source=src,
         ))
 
     summary = aggregate(legs, spots)
     logger.info(
-        "Delta summary for %s: %d underlying(s), total_net_delta=%s",
-        account_hash, len(summary.underlyings), summary.total_net_delta,
+        "Greek summary for %s: %d underlying(s), net_delta=%s net_gamma=%s net_theta=%s",
+        account_hash, len(summary.underlyings),
+        summary.total_net_delta, summary.total_net_gamma, summary.total_net_theta,
     )
     return summary
 
@@ -351,10 +358,14 @@ def _parse_osi(symbol: str) -> dict | None:
 
 
 def _delta_from_quote(q: dict | None) -> Decimal | None:
+    return _greek_from_quote(q, "delta")
+
+
+def _greek_from_quote(q: dict | None, name: str) -> Decimal | None:
     if not q:
         return None
     quote = q.get("quote", {}) if isinstance(q, dict) else {}
-    return _d(quote.get("delta"))
+    return _d(quote.get(name))
 
 
 def _spot_from_quote(q: dict | None) -> Decimal | None:
