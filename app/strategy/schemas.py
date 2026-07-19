@@ -11,7 +11,11 @@ class LegBreakdownResponse(BaseModel):
     expiration: date | None
     quantity: Decimal
     delta: Decimal | None
+    gamma: Decimal | None
+    theta: Decimal | None
     delta_contribution: Decimal | None
+    gamma_contribution: Decimal | None
+    theta_contribution: Decimal | None
     delta_source: str
 
 
@@ -20,8 +24,12 @@ class UnderlyingDeltaResponse(BaseModel):
     spot: Decimal | None
     shares: Decimal
     net_delta: Decimal | None
+    net_gamma: Decimal | None
+    net_theta: Decimal | None
     short_call_delta: Decimal | None
+    short_call_theta: Decimal | None
     long_put_delta: Decimal | None
+    long_put_theta: Decimal | None
     incomplete: bool
     legs: list[LegBreakdownResponse]
 
@@ -29,6 +37,8 @@ class UnderlyingDeltaResponse(BaseModel):
 class AccountDeltaSummaryResponse(BaseModel):
     account_hash: str
     total_net_delta: Decimal | None
+    total_net_gamma: Decimal | None
+    total_net_theta: Decimal | None
     underlyings: list[UnderlyingDeltaResponse]
 
 
