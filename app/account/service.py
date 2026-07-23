@@ -74,6 +74,21 @@ async def get_account_hash_by_alias(account_alias: str, db: AsyncSession) -> str
     return accounts[0].account_hash if accounts else None
 
 
+async def resolve_account_identifier(account_identifier: str, db: AsyncSession) -> str | None:
+    """
+    Resolve an account_identifier (either an account_hash or an account_alias)
+    to its canonical account_hash. account_hash takes precedence: only falls
+    back to an account_alias lookup if no account_hash matches.
+
+    Returns None if account_identifier matches neither. Raises ValueError if
+    account_identifier is an alias shared by more than one account.
+    """
+    accounts = await list_accounts(db)
+    if any(a.account_hash == account_identifier for a in accounts):
+        return account_identifier
+    return await get_account_hash_by_alias(account_identifier, db)
+
+
 async def get_account_summary(account_hash: str, db: AsyncSession) -> AccountSnapshot:
     client = get_schwab_client()
     response = client.account_details(account_hash, fields="positions")
