@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.account.models import Position
+from app.pnl import service as pnl_service
 from app.core.config import settings
 from app.core.schwab_client import get_schwab_client
 from app.strategy.aggregator import LegInput, AccountDeltaSummary, aggregate
@@ -73,45 +74,7 @@ async def build_delta_summary(
     option_symbols = {m["symbol"] for m in legs_meta if m["contract_type"] is not None}
     underlyings = {m["underlying"] for m in legs_meta}
 
-    use_stream = source in ("auto", "stream")
-    allow_quote = source in ("auto", "quote")
-
-    # Pass 1: try the live stream cache for option greeks and underlying spots.
-    option_greeks: dict[str, tuple] = {}  # symbol -> (delta, gamma, theta, src)
-    spots: dict[str, Decimal | None] = {}
-    need_quote: set[str] = set()
-
-    for sym in option_symbols:
-        d = get_live_greek(sym, "delta") if use_stream else None
-        if d is not None:
-            option_greeks[sym] = (d, get_live_greek(sym, "gamma"), get_live_greek(sym, "theta"), "stream")
-        elif allow_quote:
-            need_quote.add(sym)
-        else:
-            option_greeks[sym] = (None, None, None, "none")
-
-    for u in underlyings:
-        s = get_live_greek(u, "last") if use_stream else None
-        if s is not None:
-            spots[u] = s
-        else:
-            spots[u] = None
-            if allow_quote:
-                need_quote.add(u)
-
-    # Pass 2: one quotes call for whatever the stream didn't cover.
-    quotes = _fetch_quotes(sorted(need_quote)) if need_quote else {}
-    for sym in option_symbols:
-        if sym not in option_greeks:
-            q = quotes.get(sym)
-            d = _greek_from_quote(q, "delta")
-            option_greeks[sym] = (
-                d, _greek_from_quote(q, "gamma"), _greek_from_quote(q, "theta"),
-                "quote" if d is not None else "none",
-            )
-    for u in underlyings:
-        if spots.get(u) is None and u in quotes:
-            spots[u] = _spot_from_quote(quotes.get(u))
+    option_greeks, spots = _source_greeks(option_symbols, underlyings, source)
 
     legs: list[LegInput] = []
     for m in legs_meta:
@@ -140,6 +103,65 @@ async def build_delta_summary(
         summary.total_net_delta, summary.total_net_gamma, summary.total_net_theta,
     )
     return summary
+
+
+async def build_structure_summary(
+    account_hash: str, db: AsyncSession, source: str = "auto"
+) -> list[dict]:
+    """
+    Per-structure combined greeks for an account's complex positions.
+
+    Answers "what is the net theta of *this* diagonal" — which the per-underlying
+    summary cannot, since it sums every leg on a ticker into one number.
+    """
+    groups = await pnl_service.list_structures(account_hash, db)
+    if not groups:
+        return []
+
+    option_symbols = {l.symbol for g in groups for l in g.legs}
+    underlyings = {g.underlying for g in groups}
+    option_greeks, spots = _source_greeks(option_symbols, underlyings, source)
+
+    summaries: list[dict] = []
+    for group in groups:
+        legs = [
+            LegInput(
+                symbol=l.symbol,
+                asset_type="OPTION",
+                underlying=l.underlying,
+                quantity=l.quantity,
+                contract_type=l.contract_type,
+                strike=l.strike,
+                expiration=l.expiration,
+                delta=option_greeks.get(l.symbol, (None, None, None, "none"))[0],
+                gamma=option_greeks.get(l.symbol, (None, None, None, "none"))[1],
+                theta=option_greeks.get(l.symbol, (None, None, None, "none"))[2],
+                delta_source=option_greeks.get(l.symbol, (None, None, None, "none"))[3],
+            )
+            for l in group.legs
+        ]
+        # aggregate() groups by underlying; a structure is single-underlying so
+        # it yields exactly one breakdown.
+        aggregated = aggregate(legs, spots)
+        breakdown = aggregated.underlyings[0] if aggregated.underlyings else None
+
+        summaries.append({
+            "group_id": group.id,
+            "structure_key": group.structure_key,
+            "structure_type": group.group_type,
+            "underlying": group.underlying,
+            "source_order_id": group.source_order_id,
+            "entry_date": group.entry_date,
+            "spot": breakdown.spot if breakdown else None,
+            "net_delta": breakdown.net_delta if breakdown else None,
+            "net_gamma": breakdown.net_gamma if breakdown else None,
+            "net_theta": breakdown.net_theta if breakdown else None,
+            "incomplete": breakdown.incomplete if breakdown else True,
+            "legs": breakdown.legs if breakdown else [],
+        })
+
+    logger.info("Built structure summary for %s: %d structure(s)", account_hash, len(summaries))
+    return summaries
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +301,56 @@ def _resample_last(points: list[tuple], bar_minutes: float) -> list:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _source_greeks(
+    option_symbols: set[str], underlyings: set[str], source: str = "auto"
+) -> tuple[dict[str, tuple], dict[str, Decimal | None]]:
+    """
+    Resolve option greeks and underlying spots, stream-first with a single
+    quotes() fallback for whatever the stream did not cover.
+
+    Returns (symbol -> (delta, gamma, theta, provenance), underlying -> spot).
+    """
+    use_stream = source in ("auto", "stream")
+    allow_quote = source in ("auto", "quote")
+
+    option_greeks: dict[str, tuple] = {}
+    spots: dict[str, Decimal | None] = {}
+    need_quote: set[str] = set()
+
+    for sym in option_symbols:
+        d = get_live_greek(sym, "delta") if use_stream else None
+        if d is not None:
+            option_greeks[sym] = (d, get_live_greek(sym, "gamma"), get_live_greek(sym, "theta"), "stream")
+        elif allow_quote:
+            need_quote.add(sym)
+        else:
+            option_greeks[sym] = (None, None, None, "none")
+
+    for u in underlyings:
+        s = get_live_greek(u, "last") if use_stream else None
+        if s is not None:
+            spots[u] = s
+        else:
+            spots[u] = None
+            if allow_quote:
+                need_quote.add(u)
+
+    quotes = _fetch_quotes(sorted(need_quote)) if need_quote else {}
+    for sym in option_symbols:
+        if sym not in option_greeks:
+            q = quotes.get(sym)
+            d = _greek_from_quote(q, "delta")
+            option_greeks[sym] = (
+                d, _greek_from_quote(q, "gamma"), _greek_from_quote(q, "theta"),
+                "quote" if d is not None else "none",
+            )
+    for u in underlyings:
+        if spots.get(u) is None and u in quotes:
+            spots[u] = _spot_from_quote(quotes.get(u))
+
+    return option_greeks, spots
+
 
 def _fetch_quotes(symbols: list[str]) -> dict:
     if not symbols:

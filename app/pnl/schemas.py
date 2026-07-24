@@ -87,3 +87,15 @@ class ProposedGroup(BaseModel):
 class AutoDetectResponse(BaseModel):
     proposed_groups: list[ProposedGroup]
     message: str
+
+
+class StructureSyncResponse(BaseModel):
+    structures_created: int
+    singles_created: int
+    keys: list[str]                      # structure keys created by this run
+
+
+class StructureReconcileResponse(BaseModel):
+    reclassified: int
+    closed: int
+    examined: int
