@@ -17,6 +17,13 @@ class PositionGroup(Base):
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="OPEN")  # OPEN | CLOSED
     entry_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Derived readable identifier, e.g. "1002345678-20260731TQQQ1SC65/20260806TQQQ1LC65".
+    # Recomputed whenever legs change, so it is not a stable handle — `id` is.
+    structure_key: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    source_order_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # True for structures detected from filled orders; manual P&L groups stay False
+    # so sync and reconcile never rewrite them.
+    auto_managed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

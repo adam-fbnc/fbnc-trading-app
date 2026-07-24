@@ -54,6 +54,26 @@ class SmoothedDeltaResponse(BaseModel):
     samples: int
 
 
+class StructureGreeksResponse(BaseModel):
+    group_id: int
+    structure_key: str | None            # e.g. "1002345678-20260731TQQQ1SC65/20260806TQQQ1LC65"
+    structure_type: str                  # CALL_DIAGONAL | CALL_VERTICAL | SINGLE | ...
+    underlying: str
+    source_order_id: str | None
+    entry_date: datetime
+    spot: Decimal | None
+    net_delta: Decimal | None
+    net_gamma: Decimal | None
+    net_theta: Decimal | None
+    incomplete: bool                     # True if any needed greek was missing
+    legs: list[LegBreakdownResponse]
+
+
+class AccountStructuresResponse(BaseModel):
+    account_hash: str
+    structures: list[StructureGreeksResponse]
+
+
 class SnapshotRecordedResponse(BaseModel):
     account_hash: str
     underlyings_recorded: int

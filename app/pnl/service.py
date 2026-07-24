@@ -1,11 +1,13 @@
 import logging
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.account.models import Order, Transaction
+from app.account.models import Order, Position, Transaction
+from app.pnl import classifier
+from app.pnl.classifier import Leg, parse_osi as _parse_osi
 from app.pnl.models import GroupAlert, PositionGroup, PositionGroupLeg
 from app.pnl.schemas import (
     AlertResponse, CreateGroupRequest, GroupPnLResponse, LegResponse,
@@ -32,7 +34,17 @@ async def create_group(account_hash: str, req: CreateGroupRequest, db: AsyncSess
         if meta is None:
             raise ValueError(f"Cannot parse OSI symbol: {req.legs[i].symbol!r}")
 
-    group_type = req.group_type or _recognize_type(req.legs, legs_meta)
+    group_type = req.group_type or classifier.classify([
+        Leg(
+            symbol=leg.symbol.upper().strip(),
+            underlying=meta["underlying"],
+            contract_type=meta["contract_type"],
+            strike=meta["strike"],
+            expiration=meta["expiration"],
+            quantity=leg.quantity,
+        )
+        for leg, meta in zip(req.legs, legs_meta)
+    ])
     entry_date = req.entry_date or datetime.now(timezone.utc)
 
     group = PositionGroup(
@@ -346,12 +358,7 @@ async def auto_detect_groups(account_hash: str, db: AsyncSession) -> list[dict]:
         if not valid or not legs or not underlying:
             continue
 
-        class _L:
-            def __init__(self, d: dict):
-                self.symbol = d["symbol"]
-                self.quantity = d["quantity"]
-
-        group_type = _recognize_type([_L(l) for l in legs], [_parse_osi(l["symbol"]) for l in legs])
+        group_type = classifier.classify([_leg_from_dict(l) for l in legs])
         seen_order_ids.add(order_id)
         proposed.append({
             "order_id": order_id,
@@ -363,6 +370,340 @@ async def auto_detect_groups(account_hash: str, db: AsyncSession) -> list[dict]:
 
     logger.info("Auto-detected %d candidate group(s) for %s", len(proposed), account_hash)
     return proposed
+
+
+# ---------------------------------------------------------------------------
+# Complex position structures — detection and lifecycle
+# ---------------------------------------------------------------------------
+
+async def sync_structures(account_hash: str, db: AsyncSession) -> dict:
+    """
+    Detect complex positions from filled orders and persist them as auto-managed
+    groups.
+
+    Orders are walked newest-first against a pool of currently-held option
+    quantity. A leg only joins a structure if that quantity is still unclaimed,
+    which drops both the buy-to-close leg of a roll (it holds nothing) and legs
+    already claimed by a more recent order. Whatever quantity no order accounts
+    for is recorded as SINGLE.
+    """
+    remaining = await _open_option_quantities(account_hash, db)
+
+    orders_result = await db.execute(
+        select(Order)
+        .where(Order.account_hash == account_hash, Order.status == "FILLED")
+        .order_by(Order.entered_time.desc().nullslast())
+    )
+    orders = list(orders_result.scalars().all())
+
+    txn_result = await db.execute(
+        select(Transaction).where(Transaction.account_hash == account_hash)
+    )
+    txns_by_symbol: dict[str, list[Transaction]] = {}
+    for t in txn_result.scalars().all():
+        key = (t.symbol or "").upper().strip()
+        if key:
+            txns_by_symbol.setdefault(key, []).append(t)
+
+    existing = await _existing_structure_keys(account_hash, db)
+    created: list[str] = []
+
+    for order in orders:
+        order_id = str(order.order_id)
+        entry_date = order.entered_time or datetime.now(timezone.utc)
+
+        claimable: list[Leg] = []
+        for leg_raw in (order.raw or {}).get("orderLegCollection", []):
+            if leg_raw.get("orderLegType") != "OPTION":
+                continue
+            symbol = (leg_raw.get("instrument", {}).get("symbol") or "").upper().strip()
+            meta = _parse_osi(symbol)
+            if meta is None:
+                continue
+
+            held = remaining.get(symbol, Decimal("0"))
+            if held == 0:
+                continue
+            instruction = leg_raw.get("instruction", "")
+            ordered_qty = Decimal(str(leg_raw.get("quantity", 1)))
+            if "SELL" in instruction:
+                ordered_qty = -ordered_qty
+            # Only the portion still held, and only if the order leg and the
+            # holding point the same way (a closing leg points the other way).
+            if (held > 0) != (ordered_qty > 0):
+                continue
+            quantity = held if abs(held) < abs(ordered_qty) else ordered_qty
+
+            claimable.append(Leg(
+                symbol=symbol,
+                underlying=meta["underlying"],
+                contract_type=meta["contract_type"],
+                strike=meta["strike"],
+                expiration=meta["expiration"],
+                quantity=quantity,
+            ))
+
+        if not claimable:
+            continue
+
+        for part in classifier.decompose(claimable):
+            structure_key = classifier.build_structure_key(order_id, part)
+            for leg in part:
+                remaining[leg.symbol] = remaining.get(leg.symbol, Decimal("0")) - leg.quantity
+
+            if structure_key != classifier.SINGLE and structure_key in existing:
+                continue
+
+            await _persist_structure(
+                account_hash=account_hash,
+                structure_key=structure_key,
+                source_order_id=order_id,
+                legs=part,
+                entry_date=entry_date,
+                order=order,
+                txns_by_symbol=txns_by_symbol,
+                db=db,
+            )
+            existing.add(structure_key)
+            created.append(structure_key)
+
+    # Anything still held that no order accounted for stands alone.
+    singles = 0
+    for symbol, quantity in remaining.items():
+        if quantity == 0:
+            continue
+        meta = _parse_osi(symbol)
+        if meta is None:
+            continue
+        leg = Leg(
+            symbol=symbol,
+            underlying=meta["underlying"],
+            contract_type=meta["contract_type"],
+            strike=meta["strike"],
+            expiration=meta["expiration"],
+            quantity=quantity,
+        )
+        if await _single_exists(account_hash, symbol, db):
+            continue
+        await _persist_structure(
+            account_hash=account_hash,
+            structure_key=classifier.SINGLE,
+            source_order_id=None,
+            legs=[leg],
+            entry_date=datetime.now(timezone.utc),
+            order=None,
+            txns_by_symbol=txns_by_symbol,
+            db=db,
+        )
+        singles += 1
+
+    await db.commit()
+    logger.info(
+        "Structure sync for %s: %d structure(s), %d single(s)",
+        account_hash, len(created), singles,
+    )
+    return {"structures_created": len(created), "singles_created": singles, "keys": created}
+
+
+async def reconcile_structures(account_hash: str, db: AsyncSession) -> dict:
+    """
+    Re-classify auto-managed structures against currently-held positions.
+
+    A leg that is gone is dropped; a leg whose quantity shrank is updated (a
+    partial close leaves the symbol present, so presence alone would miss it).
+    The structure is then re-labelled and its key rewritten — a 1:2 ratio that
+    loses one long becomes a vertical, a spread that loses a leg becomes SINGLE,
+    and a structure with nothing left is closed.
+    """
+    remaining = await _open_option_quantities(account_hash, db)
+
+    result = await db.execute(
+        select(PositionGroup)
+        .where(
+            PositionGroup.account_hash == account_hash,
+            PositionGroup.auto_managed.is_(True),
+            PositionGroup.status == "OPEN",
+        )
+        .order_by(PositionGroup.id)
+    )
+    groups = list(result.scalars().all())
+
+    reclassified, closed = 0, 0
+
+    for group in groups:
+        changed = False
+        for leg in list(group.legs):
+            available = remaining.get(leg.symbol, Decimal("0"))
+            if available == 0 or (available > 0) != (leg.quantity > 0):
+                group.legs.remove(leg)
+                changed = True
+                continue
+            if abs(available) < abs(leg.quantity):
+                leg.quantity = available
+                changed = True
+            remaining[leg.symbol] = available - leg.quantity
+
+        if not group.legs:
+            group.status = "CLOSED"
+            group.group_type = classifier.CUSTOM
+            closed += 1
+            logger.info("Structure %d (%s) closed — no legs remain", group.id, group.structure_key)
+            continue
+
+        if not changed:
+            continue
+
+        legs = [_leg_from_row(l) for l in group.legs]
+        new_type = classifier.classify(legs)
+        new_key = classifier.build_structure_key(group.source_order_id, legs)
+        logger.info(
+            "Structure %d re-classified: %s -> %s (%s -> %s)",
+            group.id, group.group_type, new_type, group.structure_key, new_key,
+        )
+        group.group_type = new_type
+        group.structure_key = new_key
+        reclassified += 1
+
+    if reclassified or closed:
+        await db.commit()
+        for group in groups:
+            pnl_state.deregister_group(group.id)
+            if group.status == "OPEN":
+                pnl_state.register_group(
+                    group_id=group.id,
+                    account_hash=group.account_hash,
+                    underlying=group.underlying,
+                    legs=[
+                        {"symbol": l.symbol, "quantity": l.quantity, "entry_price": l.entry_price}
+                        for l in group.legs
+                    ],
+                    alerts=[
+                        {"id": a.id, "alert_type": a.alert_type, "threshold_pct": a.threshold_pct}
+                        for a in group.alerts
+                        if a.is_active and a.triggered_at is None
+                    ],
+                )
+
+    logger.info(
+        "Structure reconcile for %s: %d re-classified, %d closed",
+        account_hash, reclassified, closed,
+    )
+    return {"reclassified": reclassified, "closed": closed, "examined": len(groups)}
+
+
+async def list_structures(account_hash: str, db: AsyncSession) -> list[PositionGroup]:
+    result = await db.execute(
+        select(PositionGroup)
+        .where(
+            PositionGroup.account_hash == account_hash,
+            PositionGroup.auto_managed.is_(True),
+            PositionGroup.status == "OPEN",
+        )
+        .order_by(PositionGroup.underlying, PositionGroup.id)
+    )
+    return list(result.scalars().all())
+
+
+async def _open_option_quantities(account_hash: str, db: AsyncSession) -> dict[str, Decimal]:
+    """symbol -> signed quantity currently held, options only."""
+    result = await db.execute(
+        select(Position).where(Position.account_hash == account_hash)
+    )
+    held: dict[str, Decimal] = {}
+    for pos in result.scalars().all():
+        if (pos.asset_type or "").upper() != "OPTION":
+            continue
+        symbol = (pos.symbol or "").upper().strip()
+        if symbol and pos.quantity:
+            held[symbol] = held.get(symbol, Decimal("0")) + pos.quantity
+    return held
+
+
+async def _existing_structure_keys(account_hash: str, db: AsyncSession) -> set[str]:
+    result = await db.execute(
+        select(PositionGroup.structure_key).where(
+            PositionGroup.account_hash == account_hash,
+            PositionGroup.auto_managed.is_(True),
+            PositionGroup.status == "OPEN",
+        )
+    )
+    return {k for k in result.scalars().all() if k}
+
+
+async def _single_exists(account_hash: str, symbol: str, db: AsyncSession) -> bool:
+    result = await db.execute(
+        select(PositionGroup.id)
+        .join(PositionGroupLeg, PositionGroupLeg.group_id == PositionGroup.id)
+        .where(
+            PositionGroup.account_hash == account_hash,
+            PositionGroup.auto_managed.is_(True),
+            PositionGroup.status == "OPEN",
+            PositionGroup.structure_key == classifier.SINGLE,
+            PositionGroupLeg.symbol == symbol,
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def _persist_structure(
+    account_hash: str,
+    structure_key: str,
+    source_order_id: str | None,
+    legs: list[Leg],
+    entry_date: datetime,
+    order: Order | None,
+    txns_by_symbol: dict[str, list[Transaction]],
+    db: AsyncSession,
+) -> PositionGroup:
+    group = PositionGroup(
+        account_hash=account_hash,
+        underlying=legs[0].underlying,
+        group_type=classifier.classify(legs),
+        status="OPEN",
+        entry_date=entry_date,
+        structure_key=structure_key,
+        source_order_id=source_order_id,
+        auto_managed=True,
+    )
+    db.add(group)
+    await db.flush()
+
+    for leg in legs:
+        price = _find_fill_price(leg.symbol, order, txns_by_symbol.get(leg.symbol, [])) if order else None
+        db.add(PositionGroupLeg(
+            group_id=group.id,
+            symbol=leg.symbol,
+            underlying=leg.underlying,
+            contract_type=leg.contract_type,
+            strike=leg.strike,
+            expiration=leg.expiration,
+            quantity=leg.quantity,
+            entry_price=abs(price) if price is not None else Decimal("0"),
+        ))
+    return group
+
+
+def _leg_from_row(row: PositionGroupLeg) -> Leg:
+    return Leg(
+        symbol=row.symbol,
+        underlying=row.underlying,
+        contract_type=row.contract_type,
+        strike=row.strike,
+        expiration=row.expiration,
+        quantity=row.quantity,
+    )
+
+
+def _leg_from_dict(d: dict) -> Leg:
+    return Leg(
+        symbol=d["symbol"],
+        underlying=d["underlying"],
+        contract_type=d["contract_type"],
+        strike=d["strike"],
+        expiration=d["expiration"],
+        quantity=d["quantity"],
+    )
 
 
 def _find_fill_price(symbol: str, order: Order, txns: list[Transaction]) -> Decimal | None:
@@ -431,60 +772,6 @@ async def _get_group_or_raise(group_id: int, db: AsyncSession) -> PositionGroup:
 def _validate_alert_type(alert_type: str) -> None:
     if alert_type.upper() not in _VALID_ALERT_TYPES:
         raise ValueError(f"alert_type must be one of {_VALID_ALERT_TYPES}, got: {alert_type!r}")
-
-
-def _parse_osi(symbol: str) -> dict | None:
-    """Parse OSI option symbol (e.g. 'NVDA  260620C00130000') into metadata."""
-    s = symbol.strip()
-    if len(s) < 15 or s[-9] not in ("C", "P"):
-        return None
-    try:
-        strike = Decimal(s[-8:]) / Decimal("1000")
-        cp = s[-9]
-        yymmdd = s[-15:-9]
-        root = s[:-15].strip()
-        expiration = date(2000 + int(yymmdd[:2]), int(yymmdd[2:4]), int(yymmdd[4:6]))
-    except (ValueError, ArithmeticError):
-        return None
-    if not root:
-        return None
-    return {
-        "underlying": root,
-        "contract_type": "CALL" if cp == "C" else "PUT",
-        "strike": strike,
-        "expiration": expiration,
-    }
-
-
-def _recognize_type(legs: list, legs_meta: list[dict | None]) -> str:
-    """Best-effort spread type label from leg count and call/put/long/short breakdown."""
-    calls = [l for l, m in zip(legs, legs_meta) if m and m["contract_type"] == "CALL"]
-    puts = [l for l, m in zip(legs, legs_meta) if m and m["contract_type"] == "PUT"]
-    longs = [l for l in legs if l.quantity > 0]
-    shorts = [l for l in legs if l.quantity < 0]
-    n = len(legs)
-
-    if n == 2:
-        if len(calls) == 2 and len(longs) == 1 and len(shorts) == 1:
-            return "CALL_SPREAD"
-        if len(puts) == 2 and len(longs) == 1 and len(shorts) == 1:
-            return "PUT_SPREAD"
-        if len(calls) == 1 and len(puts) == 1:
-            return "RISK_REVERSAL"
-    if n == 3:
-        if len(calls) == 3:
-            return "CALL_BACKSPREAD" if len(longs) > len(shorts) else "CALL_RATIO"
-        if len(puts) == 3:
-            return "PUT_BACKSPREAD" if len(longs) > len(shorts) else "PUT_RATIO"
-    if n == 4:
-        if len(calls) == 2 and len(puts) == 2:
-            return "IRON_CONDOR"
-        if len(calls) == 4:
-            return "CALL_BUTTERFLY"
-        if len(puts) == 4:
-            return "PUT_BUTTERFLY"
-
-    return "CUSTOM"
 
 
 def _d(value) -> Decimal | None:

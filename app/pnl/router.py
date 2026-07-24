@@ -1,7 +1,7 @@
 import logging
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.account import service as account_service
@@ -10,10 +10,61 @@ from app.pnl import service
 from app.pnl.schemas import (
     AlertRequest, AlertResponse, AutoDetectResponse,
     CreateGroupRequest, GroupPnLResponse, ProposedGroup, ProposedLeg,
+    StructureSyncResponse, StructureReconcileResponse,
+)
+
+ACCOUNT_IDENTIFIER = Path(
+    ...,
+    description=(
+        "Account hash or account alias identifying the account. "
+        "account_hash is checked first; if no account_hash matches, the value "
+        "is looked up as an account_alias."
+    ),
 )
 
 logger = logging.getLogger("app.pnl")
 router = APIRouter(prefix="/pnl", tags=["pnl"])
+
+
+# ---------------------------------------------------------------------------
+# Complex position structures
+# ---------------------------------------------------------------------------
+
+@router.post("/{account_identifier}/structures/sync", response_model=StructureSyncResponse)
+async def sync_structures(
+    account_identifier: str = ACCOUNT_IDENTIFIER,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Detect complex positions (spreads, ratios, butterflies) from filled orders
+    and persist them as auto-managed structures.
+
+    A multi-leg order is split into its constituent spreads — a 4-leg order that
+    combines a roll-up with a new diagonal becomes two structures, and a condor
+    becomes a call spread plus a put spread. Legs that hold nothing (the
+    buy-to-close side of a roll) are dropped. Sync positions first.
+
+    Manually created groups are never touched.
+    """
+    account_hash = await _resolve_account_identifier(account_identifier, db)
+    result = await service.sync_structures(account_hash, db)
+    return StructureSyncResponse(**result)
+
+
+@router.post("/{account_identifier}/structures/reconcile", response_model=StructureReconcileResponse)
+async def reconcile_structures(
+    account_identifier: str = ACCOUNT_IDENTIFIER,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Re-classify structures against currently-held positions after a leg is
+    closed or partially closed. A 1:2 ratio that loses one long becomes a
+    vertical; a spread that loses a leg becomes SINGLE; a structure with nothing
+    left is closed. Sync positions first.
+    """
+    account_hash = await _resolve_account_identifier(account_identifier, db)
+    result = await service.reconcile_structures(account_hash, db)
+    return StructureReconcileResponse(**result)
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +233,21 @@ async def _assert_account(account_hash: str, db: AsyncSession) -> None:
     accounts = await account_service.list_accounts(db)
     if not any(a.account_hash == account_hash for a in accounts):
         raise HTTPException(status_code=404, detail="Account not found")
+
+
+async def _resolve_account_identifier(account_identifier: str, db: AsyncSession) -> str:
+    """Resolve account_identifier to an account_hash, trying account_hash first
+    and falling back to account_alias."""
+    try:
+        account_hash = await account_service.resolve_account_identifier(account_identifier, db)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    if account_hash is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No account found with hash or alias '{account_identifier}'",
+        )
+    return account_hash
 
 
 async def _get_group(account_hash: str, group_id: int, db: AsyncSession):

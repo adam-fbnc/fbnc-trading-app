@@ -6,7 +6,7 @@ from app.strategy.aggregator import AccountDeltaSummary
 from app.strategy.schemas import (
     AccountDeltaSummaryResponse, UnderlyingDeltaResponse, LegBreakdownResponse,
     SmoothedDeltaResponse, SnapshotRecordedResponse, SchedulerStatusResponse,
-    TrackedAccountsResponse,
+    TrackedAccountsResponse, AccountStructuresResponse, StructureGreeksResponse,
 )
 from app.strategy.moving_averages import MA_TYPES
 from app.strategy import streaming as strategy_streaming
@@ -48,6 +48,33 @@ async def get_delta_for_underlying(
     account_hash = await _resolve_account_identifier(account_identifier, db)
     summary = await service.build_delta_summary(account_hash, db, underlying_filter=underlying)
     return _single_underlying(summary, account_hash, underlying)
+
+
+# ---------------------------------------------------------------------------
+# Complex positions: per-structure combined greeks
+# ---------------------------------------------------------------------------
+
+@router.get("/{account_identifier}/structures", response_model=AccountStructuresResponse)
+async def get_structures(account_identifier: str = ACCOUNT_IDENTIFIER, db: AsyncSession = Depends(get_db)):
+    """
+    Combined greeks per complex position (spread, ratio, butterfly), so a single
+    diagonal's net theta can be read on its own rather than summed with every
+    other leg on the same underlying.
+
+    Detect structures first via POST /pnl/{account_identifier}/structures/sync.
+    """
+    account_hash = await _resolve_account_identifier(account_identifier, db)
+    summaries = await service.build_structure_summary(account_hash, db)
+    return AccountStructuresResponse(
+        account_hash=account_hash,
+        structures=[
+            StructureGreeksResponse(
+                **{k: v for k, v in s.items() if k != "legs"},
+                legs=[_leg_to_response(l) for l in s["legs"]],
+            )
+            for s in summaries
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -195,18 +222,19 @@ def _underlying_to_response(u) -> UnderlyingDeltaResponse:
         long_put_delta=u.long_put_delta,
         long_put_theta=u.long_put_theta,
         incomplete=u.incomplete,
-        legs=[
-            LegBreakdownResponse(
-                symbol=l.symbol, asset_type=l.asset_type, contract_type=l.contract_type,
-                strike=l.strike, expiration=l.expiration, quantity=l.quantity,
-                delta=l.delta, gamma=l.gamma, theta=l.theta,
-                delta_contribution=l.delta_contribution,
-                gamma_contribution=l.gamma_contribution,
-                theta_contribution=l.theta_contribution,
-                delta_source=l.delta_source,
-            )
-            for l in u.legs
-        ],
+        legs=[_leg_to_response(l) for l in u.legs],
+    )
+
+
+def _leg_to_response(l) -> LegBreakdownResponse:
+    return LegBreakdownResponse(
+        symbol=l.symbol, asset_type=l.asset_type, contract_type=l.contract_type,
+        strike=l.strike, expiration=l.expiration, quantity=l.quantity,
+        delta=l.delta, gamma=l.gamma, theta=l.theta,
+        delta_contribution=l.delta_contribution,
+        gamma_contribution=l.gamma_contribution,
+        theta_contribution=l.theta_contribution,
+        delta_source=l.delta_source,
     )
 
 
